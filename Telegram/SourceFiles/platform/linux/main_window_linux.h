@@ -28,6 +28,7 @@ public:
 protected:
 	bool eventFilter(QObject *obj, QEvent *evt) override;
 
+	void initHook() override;
 	void unreadCounterChangedHook() override;
 	void updateGlobalMenuHook() override;
 

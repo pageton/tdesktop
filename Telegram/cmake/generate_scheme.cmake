@@ -14,6 +14,8 @@ function(generate_scheme target_name script scheme_files)
     set(gen_files
         ${gen_dst}/scheme.cpp
         ${gen_dst}/scheme.h
+        ${gen_dst}/scheme-tl_json.cpp
+        ${gen_dst}/scheme-tl_json.h
         ${gen_dst}/scheme-dump_to_text.cpp
         ${gen_dst}/scheme-dump_to_text.h
     )
@@ -31,6 +33,7 @@ function(generate_scheme target_name script scheme_files)
     COMMENT "Generating scheme (${target_name})"
     DEPENDS
         ${script}
+        ${src_loc}/codegen/scheme/tl_json_generator.py
         ${submodules_loc}/lib_tl/tl/generate_tl.py
         ${scheme_files}
     )

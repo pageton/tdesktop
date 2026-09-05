@@ -35,6 +35,8 @@ PRIVATE
     mtproto/details/mtproto_tcp_socket.h
     mtproto/details/mtproto_tls_socket.cpp
     mtproto/details/mtproto_tls_socket.h
+    mtproto/details/mtproto_tl_json.cpp
+    mtproto/details/mtproto_tl_json.h
     mtproto/mtproto_auth_key.cpp
     mtproto/mtproto_auth_key.h
     mtproto/mtproto_concurrent_sender.cpp
