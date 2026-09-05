@@ -3811,6 +3811,17 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 			textItem ? textItem : _dragStateItem,
 			!added);
 	}
+	if (leaderOrSelf
+		&& leaderOrSelf->isRegular()
+		&& !IsAnchoredEphemeral(leaderOrSelf)
+		&& isUponSelected != 2
+		&& isUponSelected != -2) {
+		HistoryView::AddMessageDetailsAction(
+			_menu.get(),
+			controller,
+			leaderOrSelf->fullId(),
+			this);
+	}
 	if (hasWhoReactedItem) {
 		HistoryView::AddWhoReactedAction(
 			_menu,

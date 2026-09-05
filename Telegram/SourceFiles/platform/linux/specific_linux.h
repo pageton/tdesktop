@@ -9,6 +9,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "platform/platform_specific.h"
 
+#include <QtCore/QFile>
+
 namespace Platform {
 
 inline bool CheckAppTranslocation() {

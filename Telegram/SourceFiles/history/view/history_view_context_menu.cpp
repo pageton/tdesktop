@@ -40,6 +40,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "iv/iv_rich_message_html_export.h"
 #include "ui/effects/ripple_animation.h"
 #include "ui/widgets/popup_menu.h"
+#include "ui/widgets/labels.h"
+#include "ui/widgets/selecting_scroll.h"
 #include "ui/widgets/menu/menu_action.h"
 #include "ui/widgets/menu/menu_add_action_callback_factory.h"
 #include "ui/widgets/menu/menu_common.h"
@@ -56,6 +58,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/dynamic_image.h"
 #include "ui/dynamic_thumbnails.h"
 #include "ui/boxes/edit_factcheck_box.h"
+#include "ui/layers/generic_box.h"
 #include "ui/boxes/report_box_graphics.h"
 #include "ui/painter.h"
 #include "ui/rect.h"
@@ -93,6 +96,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_file_click_handler.h"
 #include "data/data_message_reactions.h"
 #include "data/data_user.h"
+#include "data/data_web_page.h"
+#include "data/data_game.h"
 #include "data/stickers/data_custom_emoji.h"
 #include "chat_helpers/message_field.h" // FactcheckFieldIniter.
 #include "core/file_utilities.h"
@@ -111,13 +116,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session_settings.h"
 #include "media/audio/media_audio.h"
 #include "media/player/media_player_instance.h"
+#include "mtproto/details/mtproto_tl_json.h"
 #include "spellcheck/spellcheck_types.h"
 #include "apiwrap.h"
+#include "styles/style_boxes.h"
 #include "styles/style_chat.h"
+#include "styles/style_widgets.h"
 #include "styles/style_chat_helpers.h"
 #include "styles/style_layers.h"
 #include "styles/style_menu_icons.h"
 
+#include <QtCore/QFile>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QLocale>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QClipboard>
 
@@ -1649,7 +1662,176 @@ void EditTagBox(
 	return result;
 }
 
+std::optional<MTPMessage> ExtractMessageById(
+		const MTPmessages_Messages &list,
+		MsgId msgId) {
+	auto result = std::optional<MTPMessage>();
+	list.match([&](const MTPDmessages_messagesNotModified &) {
+	}, [&](const auto &data) {
+		for (const auto &message : data.vmessages().v) {
+			const auto id = message.match([](const auto &data) {
+				return data.vid().v;
+			});
+			if (id == msgId.bare) {
+				result = message;
+				return;
+			}
+		}
+	});
+	return result;
+}
+
+QJsonObject JsonErrorObject(const QString &description, const QString &type, int code) {
+	auto result = QJsonObject();
+	result.insert(u"_"_q, u"error"_q);
+	result.insert(u"description"_q, description);
+	if (!type.isEmpty()) {
+		result.insert(u"type"_q, type);
+		result.insert(u"code"_q, code);
+	}
+	return result;
+}
+
+void RequestRawMessageJson(
+		not_null<Window::SessionController*> controller,
+		FullMsgId itemId,
+		Fn<void(QJsonObject)> done) {
+	const auto item = controller->session().data().message(itemId);
+	if (!item || !item->isRegular()) {
+		return;
+	}
+	const auto peer = item->history()->peer;
+	const auto scheduled = item->isFromScheduled();
+	const auto msgId = item->id;
+	const auto inputIds = MTP_vector<MTPInputMessage>(
+		1,
+		MTP_inputMessageID(MTP_int(msgId.bare)));
+	const auto intIds = MTP_vector<MTPint>(1, MTP_int(msgId.bare));
+	const auto handle = crl::guard(controller, [=](
+			const MTPmessages_Messages &result) {
+		const auto message = ExtractMessageById(result, msgId);
+		if (!message) {
+			done(JsonErrorObject(
+				u"Message not found in response."_q,
+				QString(),
+				0));
+			return;
+		}
+		done(MTP::details::TlMessageToJson(*message));
+	});
+	const auto fail = crl::guard(controller, [=](
+			const MTP::Error &error) {
+		done(JsonErrorObject(QString(), error.type(), error.code()));
+	});
+	if (scheduled) {
+		controller->session().api().request(
+			MTPmessages_GetScheduledMessages(peer->input(), intIds)
+		).done(std::move(handle)).fail(std::move(fail)).send();
+	} else if (const auto channel = peer->asChannel()) {
+		controller->session().api().request(
+			MTPchannels_GetMessages(channel->inputChannel(), inputIds)
+		).done(std::move(handle)).fail(std::move(fail)).send();
+	} else {
+		controller->session().api().request(
+			MTPmessages_GetMessages(inputIds)
+		).done(std::move(handle)).fail(std::move(fail)).send();
+	}
+}
+
+void FillMessageJsonBox(not_null<Ui::GenericBox*> box, QString json) {
+	box->setTitle(tr::lng_context_view_json());
+	box->setWidth(st::boxWideWidth);
+	box->setMaxHeight(st::boxMaxListHeight);
+	const auto label = box->addRow(
+		object_ptr<Ui::FlatLabel>(box, st::aboutLabel),
+		st::boxRowPadding);
+	label->setText(json);
+	label->setSelectable(true);
+	Ui::SetupSelectingScroll(label, [=](int pixels) {
+		box->scrollToY(box->scrollTop() + pixels);
+	});
+	box->addButton(
+		tr::lng_context_view_json_copy(),
+		[=] { QGuiApplication::clipboard()->setText(json); });
+	box->addButton(tr::lng_box_ok(), [=] { box->closeBox(); });
+}
+
 } // namespace
+
+void ShowMessageJsonBox(
+		not_null<Window::SessionController*> controller,
+		FullMsgId itemId) {
+	RequestRawMessageJson(controller, itemId, [=](QJsonObject json) {
+		controller->show(Box(
+			FillMessageJsonBox,
+			QJsonDocument(std::move(json)).toJson(
+				QJsonDocument::Indented)));
+	});
+}
+
+void SaveMessageAsJson(
+		not_null<Window::SessionController*> controller,
+		FullMsgId itemId,
+		QWidget *parent) {
+	const auto item = controller->session().data().message(itemId);
+	if (!item || !item->isRegular()) {
+		return;
+	}
+	const auto name = filedialogDefaultName(
+		u"message_%1"_q.arg(QString::number(item->id.bare)),
+		u".json"_q);
+	RequestRawMessageJson(controller, itemId, crl::guard(
+		controller,
+		[=](QJsonObject json) {
+			FileDialog::GetWritePath(
+				parent,
+				tr::lng_context_save_json(tr::now),
+				u"JSON (*.json);;"_q + FileDialog::AllFilesFilter(),
+				name,
+				[=](QString &&path) {
+					const auto bytes = QJsonDocument(
+						json
+					).toJson(QJsonDocument::Indented);
+					auto file = QFile(path);
+					if (file.open(QIODevice::WriteOnly)) {
+						file.write(bytes);
+						file.close();
+						controller->showToast(
+							tr::lng_context_save_json_done(
+								tr::now,
+								lt_path,
+								path));
+					} else {
+						controller->showToast(
+							tr::lng_context_save_json_failed(tr::now));
+					}
+				});
+		}));
+}
+
+void AddMessageDetailsAction(
+		not_null<Ui::PopupMenu*> menu,
+		not_null<Window::SessionController*> controller,
+		FullMsgId itemId,
+		QWidget *parent) {
+	auto details = std::make_unique<Ui::PopupMenu>(
+		menu,
+		st::popupMenuWithIcons);
+	details->addAction(tr::lng_context_view_json(tr::now), [=] {
+		ShowMessageJsonBox(controller, itemId);
+	}, &st::menuIconInfo);
+	details->addAction(
+		tr::lng_context_save_json(tr::now),
+		base::fn_delayed(
+			st::defaultDropdownMenu.menu.ripple.hideDuration,
+			parent,
+			[=] { SaveMessageAsJson(controller, itemId, parent); }),
+		&st::menuIconDownload);
+	menu->addAction(
+		tr::lng_context_details(tr::now),
+		std::move(details),
+		&st::menuIconInfo);
+}
 
 std::optional<QString> CurrentVoiceTimecode(FullMsgId itemId) {
 	const auto state = ::Media::Player::instance()->getState(
@@ -1950,6 +2132,9 @@ void FillContextMenuItems(
 	if (item) {
 		const auto added = (result->actions().size() > wasAmount);
 		AddSelectRestrictionAction(result, item, !added);
+	}
+	if (item && item->isRegular()) {
+		AddMessageDetailsAction(result, list->controller(), itemId, list);
 	}
 	if (!skipWhoReacted) {
 		if (hasWhoReactedItem) {

@@ -26,6 +26,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/call_delayed.h"
 #include "base/timer.h"
 #include "base/network_reachability.h"
+#include "devtools/devtools_rpc_log.h"
 #include "test/test_rpc_retry.h"
 
 namespace MTP {
@@ -661,6 +662,7 @@ void Instance::Private::cancel(mtpRequestId requestId) {
 	if (!requestId) return;
 
 	DEBUG_LOG(("MTP Info: Cancel request %1.").arg(requestId));
+	Dev::Rpc::Cancel(requestId);
 	const auto shiftedDcId = queryRequestByDc(requestId);
 	auto msgId = mtpMsgId(0);
 	{
@@ -1029,6 +1031,15 @@ void Instance::Private::sendRequest(
 
 	request->lastSentTime = crl::now();
 	request->needsLayer = needsLayer;
+	if (needsLayer) {
+		Dev::Rpc::Start(
+			requestId,
+			realShiftedDcId,
+			afterRequestId,
+			request->constData() + SerializedRequest::kMessageBodyPosition,
+			int((*request)[SerializedRequest::kMessageLengthPosition]),
+			crl::now());
+	}
 
 	if (afterRequestId) {
 		request->after = getRequest(afterRequestId);
@@ -1163,6 +1174,12 @@ void Instance::Private::processCallback(const Response &response) {
 					QString::number(error.code()),
 					error.type(),
 					error.description()));
+			Dev::Rpc::Fail(
+				requestId,
+				error.code(),
+				error.type(),
+				error.description(),
+				crl::now());
 			const auto guard = QPointer<Instance>(_instance);
 			if (rpcErrorOccured(response, handler, error) && guard) {
 				unregisterRequest(requestId);
@@ -1186,6 +1203,11 @@ void Instance::Private::processCallback(const Response &response) {
 						"RESPONSE_PARSE_FAILED",
 						"Error parse failed.")));
 		} else {
+			Dev::Rpc::Finish(
+				requestId,
+				response.reply.constData(),
+				int(response.reply.size()) * int(sizeof(mtpPrime)),
+				crl::now());
 			const auto guard = QPointer<Instance>(_instance);
 			if (handler.done && !handler.done(response) && guard) {
 				handleError(Error::Local(

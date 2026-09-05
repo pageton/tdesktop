@@ -121,13 +121,12 @@ rpl::producer<rpl::no_value, Usernames::Error> Usernames::toggle(
 		const QString &username,
 		bool active) {
 	const auto peerId = peer->id;
-	const auto it = _toggleRequests.find(peerId);
+	auto it = _toggleRequests.find(peerId);
 	const auto found = (it != end(_toggleRequests));
-	auto &entry = (!found
-		? _toggleRequests.emplace(
-			peerId,
-			Entry{ .usernames = { username } }).first
-		: it)->second;
+	if (!found) {
+		it = _toggleRequests.try_emplace(peerId).first;
+	}
+	auto &entry = it->second;
 	if (ranges::contains(entry.usernames, username)) {
 		if (found) {
 			return entry.done.events();

@@ -53,3 +53,23 @@ if (APPLE)
             "$<TARGET_FILE_DIR:test_text>/Contents/Resources/"
     )
 endif()
+
+add_executable(test_tl_json WIN32)
+init_target(test_tl_json "(tests)")
+
+target_include_directories(test_tl_json PRIVATE ${src_loc})
+
+nice_target_sources(test_tl_json ${src_loc}
+PRIVATE
+    tests/test_tl_json.cpp
+    tests/test_tl_json_dump_stub.cpp
+    mtproto/details/mtproto_tl_json.cpp
+)
+
+target_link_libraries(test_tl_json
+PRIVATE
+    tdesktop::td_scheme
+    desktop-app::external_qt
+)
+
+set_target_properties(test_tl_json PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

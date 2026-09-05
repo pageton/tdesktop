@@ -8,12 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/calls_window.h"
 
 #include "base/power_save_blocker.h"
+#include "platform/platform_specific.h"
 #include "ui/platform/ui_platform_window_title.h"
 #include "ui/widgets/rp_window.h"
 #include "ui/layers/layer_manager.h"
 #include "ui/layers/show.h"
 #include "styles/style_calls.h"
 
+#include <QtGui/QGuiApplication>
 #include <QtGui/QWindow>
 
 namespace Calls {
@@ -96,6 +98,9 @@ Window::Window()
 {
 	_layerBg->setStyleOverrides(&st::groupCallBox, &st::groupCallLayerBox);
 	_layerBg->setHideByBackgroundClick(true);
+	Platform::SetWindowAppId(
+		window(),
+		QGuiApplication::desktopFileName() + u".call"_q);
 }
 
 Window::~Window() = default;

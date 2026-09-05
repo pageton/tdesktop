@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/qt_signal_producer.h"
 #include "core/file_utilities.h"
 #include "lang/lang_keys.h"
+#include "platform/platform_specific.h"
 #include "ui/chat/attach/attach_bot_webview.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
@@ -177,6 +178,10 @@ void Controller::showTonSite(
 void Controller::createWindow() {
 	_window = std::make_unique<Ui::RpWindow>();
 	const auto window = _window.get();
+
+	Platform::SetWindowAppId(
+		window,
+		QGuiApplication::desktopFileName() + u".article"_q);
 
 	_subtitleWrap = std::make_unique<Ui::RpWidget>(_window->body().get());
 	_subtitle = Ui::CreateChild<Ui::FlatLabel>(

@@ -40,6 +40,7 @@ include(cmake/td_ui.cmake)
 include(cmake/td_webauthn.cmake)
 include(cmake/telegram_apple_swift_runtime.cmake)
 include(cmake/generate_appstream_changelog.cmake)
+include(cmake/generate_qt_conf.cmake)
 
 if (DESKTOP_APP_TEST_APPS)
     include(cmake/tests.cmake)
@@ -821,6 +822,10 @@ PRIVATE
     dialogs/ui/dialogs_topics_view.h
     dialogs/ui/dialogs_video_userpic.cpp
     dialogs/ui/dialogs_video_userpic.h
+    devtools/devtools_rpc_inspector.cpp
+    devtools/devtools_rpc_inspector.h
+    devtools/devtools_rpc_log.cpp
+    devtools/devtools_rpc_log.h
     dialogs/dialogs_community_chats_list.cpp
     dialogs/dialogs_community_chats_list.h
     dialogs/dialogs_community_requestable_list.cpp
@@ -2444,6 +2449,41 @@ endif()
 
 set_target_properties(Telegram PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${output_folder})
 
+if (LINUX AND DESKTOP_APP_USE_PACKAGED)
+    if (DEFINED QT6_INSTALL_PREFIX AND DEFINED QT6_INSTALL_PLUGINS)
+        set(qt_plugins_dir "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
+    else()
+        get_filename_component(qt_plugins_dir "${Qt6Core_DIR}/../../lib/qt-6/plugins" ABSOLUTE)
+    endif()
+    set(qt_webp_plugin_file)
+    # The WebP codec can be shipped outside the base Qt installation (e.g.
+    # the qtimageformats package on Nix); scan known prefixes for it, since
+    # find_package can't see its config in a foreign Qt6Gui config directory.
+    set(qt_prefixes "")
+    if (DEFINED CMAKE_PREFIX_PATH)
+        string(APPEND qt_prefixes "${CMAKE_PREFIX_PATH}")
+    endif()
+    if (DEFINED ENV{CMAKE_PREFIX_PATH})
+        if (NOT "${qt_prefixes}" STREQUAL "")
+            string(APPEND qt_prefixes ":")
+        endif()
+        string(APPEND qt_prefixes "$ENV{CMAKE_PREFIX_PATH}")
+    endif()
+    string(REPLACE ":" ";" qt_prefixes "${qt_prefixes}")
+    foreach(qt_prefix IN LISTS qt_prefixes)
+        if (EXISTS "${qt_prefix}/lib/qt-6/plugins/imageformats/libqwebp.so")
+            set(qt_webp_plugin_file "${qt_prefix}/lib/qt-6/plugins/imageformats/libqwebp.so")
+            break()
+        endif()
+    endforeach()
+    if ("${qt_webp_plugin_file}" STREQUAL "")
+        message(STATUS "Qt WebP plugin not found, emoji relies on the plugins dir in qt.conf")
+    endif()
+    generate_qt_conf(Telegram
+        PLUGINS_DIR "${qt_plugins_dir}"
+        EXTRA_PLUGINS "${qt_webp_plugin_file}")
+endif()
+
 if (MSVC)
     target_link_libraries(Telegram
     PRIVATE
@@ -2620,6 +2660,13 @@ if (LINUX AND DESKTOP_APP_USE_PACKAGED)
     configure_file("../lib/xdg/org.telegram.desktop.metainfo.xml" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.metainfo.xml" @ONLY)
     generate_appstream_changelog(Telegram "${CMAKE_SOURCE_DIR}/changelog.txt" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.metainfo.xml")
     install(TARGETS Telegram RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    if (is_multi_config)
+        set(qt_conf_dir "${output_folder}/$<CONFIG>")
+    else()
+        set(qt_conf_dir "${output_folder}")
+    endif()
+    install(FILES "${qt_conf_dir}/qt.conf" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(DIRECTORY "${qt_conf_dir}/qt-plugins" DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES "Resources/art/icon16.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/16x16/apps" RENAME "org.telegram.desktop.png")
     install(FILES "Resources/art/icon16@2x.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/16x16@2/apps" RENAME "org.telegram.desktop.png")
     install(FILES "Resources/art/icon32.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/32x32/apps" RENAME "org.telegram.desktop.png")

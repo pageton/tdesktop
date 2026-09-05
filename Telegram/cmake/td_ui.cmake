@@ -13,6 +13,7 @@ include(cmake/generate_numbers.cmake)
 
 set(style_files
     ui/td_common.style
+    devtools/devtools.style
     ui/filter_icons.style
     ui/menu_icons.style
     ui/chat/chat.style

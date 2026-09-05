@@ -115,6 +115,18 @@ void MaybeAddWhenEditedForwardedAction(
 	not_null<Ui::PopupMenu*> menu,
 	not_null<HistoryItem*> item,
 	not_null<Window::SessionController*> controller);
+void ShowMessageJsonBox(
+	not_null<Window::SessionController*> controller,
+	FullMsgId itemId);
+void SaveMessageAsJson(
+	not_null<Window::SessionController*> controller,
+	FullMsgId itemId,
+	QWidget *parent);
+void AddMessageDetailsAction(
+	not_null<Ui::PopupMenu*> menu,
+	not_null<Window::SessionController*> controller,
+	FullMsgId itemId,
+	QWidget *parent);
 void ShowWhoReactedMenu(
 	not_null<base::unique_qptr<Ui::PopupMenu>*> menu,
 	QPoint position,

@@ -1840,6 +1840,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_info_link_topic_label" = "This topic link will only work for group members";
 "lng_info_location_label" = "Location";
 "lng_info_about_label" = "Description";
+"lng_info_copy_id" = "Copy ID";
+"lng_info_id_copied" = "ID copied to clipboard.";
+"lng_info_copy_chat_id" = "Copy Chat ID";
+"lng_info_copy_input_peer" = "Copy InputPeer";
+"lng_info_copied" = "Copied to clipboard.";
 "lng_info_work_open" = "Open";
 "lng_info_work_closed" = "Closed";
 "lng_info_hours_label" = "Business hours";
@@ -5511,6 +5516,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 "lng_context_save_custom_sound" = "Save for Notifications";
 "lng_context_translate" = "Translate";
 "lng_context_translate_selected" = "Translate Selected Text";
+"lng_context_details" = "Details";
+"lng_context_view_json" = "View as JSON";
+"lng_context_view_json_copy" = "Copy JSON";
+"lng_context_save_json" = "Save as JSON";
+"lng_context_save_json_done" = "Saved to {path}";
+"lng_context_save_json_failed" = "Could not save file";
 "lng_context_read_hidden" = "read";
 "lng_context_read_show" = "show when";
 "lng_context_edit_shortcut" = "Edit Shortcut";

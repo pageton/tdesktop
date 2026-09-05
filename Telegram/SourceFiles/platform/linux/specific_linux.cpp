@@ -9,6 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/openssl_help.h"
 #include "base/random.h"
+#include "base/invoke_queued.h"
 #include "base/platform/base_platform_info.h"
 #include "base/platform/linux/base_linux_dbus_utilities.h"
 #include "base/platform/linux/base_linux_xcb_utilities.h"
@@ -25,9 +26,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_controller.h"
 #include "webview/platform/linux/webview_linux_webkitgtk.h"
 
+#if defined QT_FEATURE_wayland && QT_CONFIG(wayland) \
+	&& __has_include(<QtWaylandClient/private/qwaylandwindow_p.h>)
+#include <QtWaylandClient/private/qwaylandwindow_p.h>
+#include <QtWaylandClient/private/qwaylandshellsurface_p.h>
+#define TDESKTOP_WAYLAND_APP_ID
+#endif // wayland
+
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QSystemTrayIcon>
 #include <QtGui/QDesktopServices>
+#include <QtGui/QWindow>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QProcess>
 
@@ -579,6 +588,133 @@ void PortalCheckScheme(
 		});
 }
 
+// Applies a per-window application id on every (re)show of the window:
+// the shell surface / X window is (re)created by Qt on each show, and the
+// identity has to be restored right after that, before the window is
+// mapped to the window manager. On X11 the properties can be set
+// synchronously from the Show event, before the window gets mapped; on
+// Wayland the shell surface is created slightly later, so a single
+// deferred retry is scheduled per show.
+class WindowAppIdHelper final : public QObject {
+public:
+	WindowAppIdHelper(not_null<QWidget*> widget, QString appId)
+	: QObject(widget)
+	, _widget(widget)
+	, _appId(std::move(appId)) {
+		_widget->installEventFilter(this);
+		apply();
+	}
+
+protected:
+	bool eventFilter(QObject *watched, QEvent *event) override {
+		if (watched == _widget && event->type() == QEvent::Show) {
+			_retryAllowed = true;
+			apply();
+		}
+		return QObject::eventFilter(watched, event);
+	}
+
+private:
+	void scheduleApply() {
+		if (_applyScheduled || !_retryAllowed) {
+			return;
+		}
+		_retryAllowed = false;
+		_applyScheduled = true;
+		InvokeQueued(this, [=] {
+			_applyScheduled = false;
+			apply();
+		});
+	}
+
+	void apply() {
+		const auto handle = _widget->windowHandle();
+		if (!handle || !handle->handle()) {
+			scheduleApply();
+		} else if (IsX11()) {
+			applyX11(handle);
+#ifdef TDESKTOP_WAYLAND_APP_ID
+		} else if (!applyWayland(handle)) {
+			scheduleApply();
+#endif // TDESKTOP_WAYLAND_APP_ID
+		}
+	}
+
+	void applyX11(not_null<QWindow*> window) {
+		using namespace base::Platform::XCB;
+		using namespace base::Platform::XCB::Library;
+
+		const Connection connection;
+		if (!connection || xcb_connection_has_error(connection)) {
+			return;
+		}
+
+		const auto utf8String = GetAtom(connection, "UTF8_STRING");
+		const auto gtkAppId = GetAtom(connection, "_GTK_APPLICATION_ID");
+		const auto kdeDesktopFile = GetAtom(
+			connection,
+			"_KDE_NET_WM_DESKTOP_FILE");
+
+		const auto appId = _appId.toUtf8();
+		const auto wmClass = appId + '\0' + appId + '\0';
+		const auto setUtf8String = [&](
+				xcb_atom_t atom,
+				const QByteArray &value) {
+			if (!atom) {
+				return;
+			}
+			free(xcb_request_check(
+				connection,
+				xcb_change_property_checked(
+					connection,
+					XCB_PROP_MODE_REPLACE,
+					window->winId(),
+					atom,
+					utf8String,
+					8,
+					value.size(),
+					value.constData())));
+		};
+
+		free(xcb_request_check(
+			connection,
+			xcb_change_property_checked(
+				connection,
+				XCB_PROP_MODE_REPLACE,
+				window->winId(),
+				XCB_ATOM_WM_CLASS,
+				XCB_ATOM_STRING,
+				8,
+				wmClass.size(),
+				wmClass.constData())));
+
+		setUtf8String(gtkAppId, appId);
+		setUtf8String(kdeDesktopFile, appId);
+	}
+
+#ifdef TDESKTOP_WAYLAND_APP_ID
+	// Returns false if the shell surface is not created yet and the id
+	// has to be applied from a deferred retry.
+	[[nodiscard]] bool applyWayland(not_null<QWindow*> window) {
+		const auto waylandWindow = dynamic_cast<
+			QtWaylandClient::QWaylandWindow*>(window->handle());
+		if (!waylandWindow) {
+			return true;
+		} else if (const auto shellSurface = waylandWindow->shellSurface()) {
+			shellSurface->setAppId(_appId);
+			return true;
+		}
+		return false;
+	}
+#endif // TDESKTOP_WAYLAND_APP_ID
+
+	not_null<QWidget*> _widget;
+	const QString _appId;
+	bool _applyScheduled = false;
+	bool _retryAllowed = false;
+
+};
+
 } // namespace
 
 namespace Platform {
@@ -855,6 +991,10 @@ QString ApplicationIconName() {
 		: QGuiApplication::desktopFileName().remove(
 		u"._"_q + Core::Launcher::Instance().instanceHash());
 	return Result;
+}
+
+void SetWindowAppId(not_null<QWidget*> widget, const QString &appId) {
+	new WindowAppIdHelper(widget, appId);
 }
 
 void LaunchMaps(const Data::LocationPoint &point, Fn<void()> fail) {

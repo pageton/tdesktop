@@ -345,6 +345,9 @@ public:
 	[[nodiscard]] bool hideEditedBadge() const {
 		return (_flags & MessageFlag::HideEdited);
 	}
+	[[nodiscard]] bool isLegacyMessage() const {
+		return _flags & MessageFlag::Legacy;
+	}
 	[[nodiscard]] bool hideDisplayDate() const {
 		return isEmpty() || (_flags & MessageFlag::HideDisplayDate);
 	}
@@ -697,9 +700,6 @@ private:
 	void detectTextLinks(const TextWithEntities &textWithEntities);
 	void setTextValue(TextWithEntities text, bool force = false);
 	[[nodiscard]] bool isTooOldForEdit(TimeId now) const;
-	[[nodiscard]] bool isLegacyMessage() const {
-		return _flags & MessageFlag::Legacy;
-	}
 
 	[[nodiscard]] bool checkDiscussionLink(ChannelId id) const;
 	void updateSentContent(

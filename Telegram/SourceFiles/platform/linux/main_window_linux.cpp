@@ -134,6 +134,14 @@ MainWindow::MainWindow(not_null<Window::Controller*> controller)
 : Window::MainWindow(controller) {
 }
 
+void MainWindow::initHook() {
+	if (id().type == Window::SeparateType::Chat) {
+		SetWindowAppId(
+			this,
+			QGuiApplication::desktopFileName() + u".chat"_q);
+	}
+}
+
 void MainWindow::workmodeUpdated(Core::Settings::WorkMode mode) {
 	if (!TrayIconSupported()) {
 		return;

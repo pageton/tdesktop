@@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/ui_utility.h"
 #include "lang/lang_keys.h"
 #include "core/file_utilities.h"
+#include "platform/platform_specific.h"
 #include "webview/webview_embed.h"
 #include "webview/webview_dialog.h"
 #include "webview/webview_interface.h"
@@ -1218,7 +1219,7 @@ Panel::Panel(Args &&args)
 	: nullptr)
 , _fullscreen(args.fullscreen)
 , _allowClipboardRead(args.allowClipboardRead)
-, _sameOrigin(args.sameOrigin) {
+	, _sameOrigin(args.sameOrigin) {
 	if (_externalShell) {
 		_widget->setAttribute(Qt::WA_DontShowOnScreen);
 		_externalLayer->boxAdded(
@@ -1229,6 +1230,10 @@ Panel::Panel(Args &&args)
 		) | rpl::on_next([=] {
 			setExternalShellBlocked(false);
 		}, _widget->lifetime());
+	} else {
+		::Platform::SetWindowAppId(
+			_widget.get(),
+			QGuiApplication::desktopFileName() + u".webapp"_q);
 	}
 	_widget->setWindowFlag(Qt::WindowStaysOnTopHint, false);
 	_widget->setInnerSize(st::botWebViewPanelSize, true);

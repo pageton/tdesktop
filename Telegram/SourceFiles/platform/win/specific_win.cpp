@@ -545,6 +545,9 @@ void SetWindowScreenshotProtection(not_null<QWidget*> window, bool enabled) {
 	}
 }
 
+void SetWindowAppId(not_null<QWidget*> window, const QString &appId) {
+}
+
 void SetWindowPriority(not_null<QWidget*> window, uint32 priority) {
 	const auto hwnd = reinterpret_cast<HWND>(window->winId());
 	Assert(hwnd != nullptr);

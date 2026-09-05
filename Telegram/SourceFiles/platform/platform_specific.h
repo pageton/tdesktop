@@ -15,6 +15,8 @@ namespace Data {
 class LocationPoint;
 } // namespace Data
 
+class QWindow;
+
 namespace Platform {
 
 void start();
@@ -61,6 +63,7 @@ void AutostartToggle(bool enabled, Fn<void(bool)> done = nullptr);
 [[nodiscard]] bool ScreenshotProtectionSupported();
 [[nodiscard]] bool AmbientScreenshotProtectionSupported();
 void SetWindowScreenshotProtection(not_null<QWidget*> window, bool enabled);
+void SetWindowAppId(not_null<QWidget*> window, const QString &appId);
 void WriteCrashDumpDetails();
 void NewVersionLaunched(int oldVersion);
 [[nodiscard]] QImage DefaultApplicationIcon();

@@ -81,6 +81,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/controls/userpic_button.h"
 #include "ui/effects/credits_graphics.h"
 #include "ui/effects/toggle_arrow.h"
+#include "ui/image/image_location.h"
 #include "ui/painter.h"
 #include "ui/rect.h"
 #include "ui/ui_utility.h"
@@ -151,6 +152,83 @@ base::options::toggle ShowChannelJoinedBelowAbout({
 	.name = "Show Channel Joined Date in Profile",
 	.description = "Show when you join Channel under its Description.",
 });
+
+QString IDString(not_null<PeerData*> peer) {
+	return QString::number(peer->id.value & PeerId::kChatTypeMask);
+}
+
+QString IDString(MsgId topicRootId) {
+	return QString::number(topicRootId.bare);
+}
+
+rpl::producer<TextWithEntities> IDValue(not_null<PeerData*> peer) {
+	return rpl::single(tr::marked(IDString(peer)));
+}
+
+rpl::producer<TextWithEntities> IDValue(MsgId topicRootId) {
+	return rpl::single(tr::marked(IDString(topicRootId)));
+}
+
+QString getDCName(int dc) {
+	const auto getName = [=] {
+		switch (dc) {
+			case 1:
+			case 3: return "Miami FL, USA";
+			case 2:
+			case 4: return "Amsterdam, NL";
+			case 5: return "Singapore, SG";
+			default: return "UNKNOWN";
+		}
+	};
+
+	if (dc < 1) {
+		return {"DC_UNKNOWN"};
+	}
+
+	return QString("DC%1, %2").arg(dc).arg(getName());
+}
+
+QString getPeerDC(not_null<PeerData*> peer) {
+	if (const auto statsDcId = peer->owner().statsDcId(peer)) {
+		return getDCName(statsDcId);
+	}
+
+	if (peer->hasUserpic()) {
+		const auto dc = v::match(
+			peer->userpicLocation().file().data,
+			[&](const StorageFileLocation &data) {
+				return data.dcId();
+			},
+			[&](const WebFileLocation &) {
+				// shouldn't happen, but still
+				// all webpages are on DC4
+				return 4;
+			},
+			[&](const GeoPointLocation &) {
+				// shouldn't happen naturally
+				return 0;
+			},
+			[&](const AudioAlbumThumbLocation &) {
+				// shouldn't happen naturally
+				return 0;
+			},
+			[&](const PlainUrlLocation &) {
+				// shouldn't happen, but still
+				// all webpages are on DC4
+				return 4;
+			},
+			[&](const InMemoryLocation &) {
+				// shouldn't happen naturally
+				return 0;
+			});
+
+		if (dc > 0) {
+			return getDCName(dc);
+		}
+	}
+
+	return {};
+}
 
 [[nodiscard]] rpl::producer<TextWithEntities> UsernamesSubtext(
 		not_null<PeerData*> peer,
@@ -1761,6 +1839,30 @@ Section DetailsFiller::makeInfo() {
 				QString()
 			).text->setLinksTrusted();
 		}
+
+		{
+			const auto dataCenter = getPeerDC(_peer);
+			const auto idLabel = dataCenter.isEmpty() ? u"ID"_q : dataCenter;
+
+			auto idDrawableText = IDValue(
+				user
+			) | rpl::map([](TextWithEntities &&text) {
+				return Ui::Text::Wrapped(text, EntityType::Code, {});
+			});
+			auto idInfo = addInfoOneLine(
+				rpl::single(idLabel),
+				std::move(idDrawableText),
+				tr::lng_info_copy_id(tr::now));
+
+			idInfo.text->setClickHandlerFilter([=](auto &&...) {
+				const auto idText = IDString(user);
+				if (!idText.isEmpty()) {
+					QGuiApplication::clipboard()->setText(idText);
+					controller->showToast(tr::lng_info_id_copied(tr::now));
+				}
+				return false;
+			});
+		}
 	} else {
 		const auto topicRootId = _topic ? _topic->rootId() : 0;
 		const auto addToLink = topicRootId
@@ -1849,7 +1951,54 @@ Section DetailsFiller::makeInfo() {
 			addTranslateToMenu(about.text, AboutWithAdvancedValue(_peer));
 			SetupAboutPeerIdDrag(about.text, _peer);
 		}
+
+		if (!_topic) {
+			const auto dataCenter = getPeerDC(_peer);
+			const auto idLabel = dataCenter.isEmpty() ? u"ID"_q : dataCenter;
+
+			auto idDrawableText = IDValue(
+				_peer
+			) | rpl::map([](TextWithEntities &&text) {
+				return Ui::Text::Wrapped(text, EntityType::Code, {});
+			});
+			auto idInfo = addInfoOneLine(
+				idLabel,
+				std::move(idDrawableText),
+				tr::lng_info_copy_id(tr::now));
+
+			idInfo.text->setClickHandlerFilter([=, peer = _peer](auto &&...) {
+				const auto idText = IDString(peer);
+				if (!idText.isEmpty()) {
+					QGuiApplication::clipboard()->setText(idText);
+					controller->showToast(tr::lng_info_id_copied(tr::now));
+				}
+				return false;
+			});
+		}
+
+		if (_topic) {
+			auto idDrawableText = IDValue(
+				_peer->forumTopicFor(topicRootId)->topicRootId()
+			) | rpl::map([](TextWithEntities &&text) {
+				return Ui::Text::Wrapped(text, EntityType::Code, {});
+			});
+			auto idInfo = addInfoOneLine(
+				rpl::single(u"ID"_q),
+				std::move(idDrawableText),
+				tr::lng_info_copy_id(tr::now));
+
+			idInfo.text->setClickHandlerFilter([=, peer = _peer](auto &&...) {
+				const auto idText = IDString(
+					peer->forumTopicFor(topicRootId)->topicRootId());
+				if (!idText.isEmpty()) {
+					QGuiApplication::clipboard()->setText(idText);
+					controller->showToast(tr::lng_info_id_copied(tr::now));
+				}
+				return false;
+			});
+		}
 	}
+
 	raw->toggleOn(tracker.atLeastOneShownValue());
 	raw->finishAnimating();
 

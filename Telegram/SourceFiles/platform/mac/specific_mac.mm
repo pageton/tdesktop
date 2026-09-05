@@ -518,6 +518,9 @@ void SetWindowScreenshotProtection(not_null<QWidget*> window, bool enabled) {
 		: NSWindowSharingReadOnly;
 }
 
+void SetWindowAppId(not_null<QWidget*> window, const QString &appId) {
+}
+
 void LaunchMaps(const Data::LocationPoint &point, Fn<void()> fail) {
 	if (!QDesktopServices::openUrl(
 		u"https://maps.apple.com/?q=Point&z=16&ll=%1,%2"_q.arg(

@@ -22,6 +22,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/openssl_help.h"
 #include "base/unixtime.h"
 #include "base/platform/base_platform_info.h"
+#include "devtools/devtools_rpc_log.h"
 
 #include <ksandbox.h>
 #include <zlib.h>
@@ -476,6 +477,10 @@ mtpMsgId SessionPrivate::prepareToSend(
 	request.setSeqNo(nextRequestSeqNumber(request.needAck()));
 	if (request->requestId) {
 		MTP_LOG(_shiftedDcId, ("[r%1] msg_id 0 -> %2").arg(request->requestId).arg(currentLastId));
+		Dev::Rpc::Sent(
+			request->requestId,
+			currentLastId,
+			request.getSeqNo());
 	}
 	return currentLastId;
 }
@@ -530,6 +535,9 @@ mtpMsgId SessionPrivate::replaceMsgId(SerializedRequest &request, mtpMsgId newId
 	}
 	request.setMsgId(newId);
 	request.setSeqNo(nextRequestSeqNumber(request.needAck()));
+	if (request->requestId) {
+		Dev::Rpc::Sent(request->requestId, newId, request.getSeqNo());
+	}
 	return newId;
 }
 

@@ -36,6 +36,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "dialogs/dialogs_widget.h"
 #include "dialogs/ui/dialogs_layout.h"
 #include "ffmpeg/ffmpeg_utility.h"
+#include "devtools/devtools_rpc_inspector.h"
+#include "devtools/devtools_rpc_log.h"
 #include "history/history_item_components.h"
 #include "history/view/controls/compose_controls_common.h"
 #include "history/view/history_view_message.h"
@@ -342,13 +344,6 @@ void SetupExperimental(
 
 	Ui::AddSkip(header, st::settingsCheckboxesSkip);
 
-	header->add(
-		object_ptr<Ui::FlatLabel>(
-			header,
-			tr::lng_settings_experimental_about(),
-			st::boxLabel),
-		st::defaultBoxDividerLabelPadding);
-
 	auto reset = (Button*)nullptr;
 	if (base::options::changed()) {
 		const auto wrap = header->add(
@@ -461,6 +456,12 @@ void SetupExperimental(
 				Webview::kOptionWebviewLegacyEdge,
 			}
 		},
+		{
+			u"Developer tools"_q,
+			{
+				Dev::Rpc::kOptionRpcInspector,
+			}
+		},
 	};
 
 	const auto addOption = [&](
@@ -561,6 +562,12 @@ void Experimental::fillTopBarMenu(const Ui::Menu::MenuCallback &addAction) {
 			});
 		},
 		&st::menuIconCopy);
+	addAction(
+		u"RPC Inspector"_q,
+		[=] {
+			Dev::Rpc::ShowRpcInspector(controller());
+		},
+		&st::menuIconInfo);
 	if (!DecodeOptionsFromText(QGuiApplication::clipboard()->text()).ok) {
 		return;
 	}

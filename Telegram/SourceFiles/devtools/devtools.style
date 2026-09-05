@@ -1,0 +1,41 @@
+// This file is part of Telegram Desktop,
+// the official desktop application for the Telegram messaging service.
+//
+// For license and copyright information please follow this link:
+// https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+//
+using "ui/basic.style";
+using "ui/widgets/widgets.style";
+
+rpcInspectorRowHeight: 44px;
+rpcInspectorRowPadding: margins(12px, 5px, 12px, 5px);
+rpcInspectorMetaFont: font(12px);
+rpcInspectorField: InputField(defaultInputField) {
+	heightMin: 160px;
+	heightMax: 420px;
+}
+rpcInspectorListHeight: 400px;
+rpcInspectorStatusSize: 8px;
+
+rpcInspectorDetailsTitleStyle: TextStyle(defaultTextStyle) {
+	font: font(11px semibold);
+	lineHeight: 16px;
+}
+rpcInspectorDetailsTitle: FlatLabel(defaultFlatLabel) {
+	textFg: windowSubTextFg;
+	style: rpcInspectorDetailsTitleStyle;
+}
+rpcInspectorDetailsOverviewStyle: TextStyle(defaultTextStyle) {
+	lineHeight: 20px;
+}
+rpcInspectorDetailsOverview: FlatLabel(defaultFlatLabel) {
+	align: align(topleft);
+	style: rpcInspectorDetailsOverviewStyle;
+}
+rpcInspectorDetailsJsonStyle: TextStyle(defaultTextStyle) {
+	lineHeight: 17px;
+}
+rpcInspectorDetailsJson: FlatLabel(defaultFlatLabel) {
+	align: align(topleft);
+	style: rpcInspectorDetailsJsonStyle;
+}

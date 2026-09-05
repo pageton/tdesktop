@@ -75,6 +75,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "api/api_polls.h"
 #include "api/api_todo_lists.h"
 #include "api/api_updates.h"
+#include "mtproto/details/mtproto_tl_json.h"
 #include "mtproto/mtproto_config.h"
 #include "history/history.h"
 #include "history/history_item_helpers.h" // GetErrorForSending.
@@ -137,6 +138,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_premium.h"
 
 #include <QAction>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
 #include <QtWidgets/QApplication>
 
 namespace Window {
@@ -348,6 +351,7 @@ private:
 	void addBoostChat();
 	void addToggleFee();
 	void addSetPersonalChannel();
+	void addDeveloperActions();
 
 	[[nodiscard]] bool skipCreateActions() const;
 	[[nodiscard]] SendMenu::Details createSendMenuDetails() const;
@@ -1942,6 +1946,145 @@ void Filler::fillHistoryActions() {
 	addLeaveChat();
 }
 
+[[nodiscard]] QJsonObject InputPeerToJson(const MTPInputPeer &peer) {
+	auto result = QJsonObject();
+	peer.match([&](const MTPDinputPeerEmpty &) {
+		result.insert(u"_"_q, u"inputPeerEmpty"_q);
+	}, [&](const MTPDinputPeerSelf &) {
+		result.insert(u"_"_q, u"inputPeerSelf"_q);
+	}, [&](const MTPDinputPeerChat &data) {
+		result.insert(u"_"_q, u"inputPeerChat"_q);
+		result.insert(u"chat_id"_q, double(data.vchat_id().v));
+	}, [&](const MTPDinputPeerUser &data) {
+		result.insert(u"_"_q, u"inputPeerUser"_q);
+		result.insert(u"user_id"_q, double(data.vuser_id().v));
+		result.insert(
+			u"access_hash"_q,
+			QString::number(data.vaccess_hash().v));
+	}, [&](const MTPDinputPeerChannel &data) {
+		result.insert(u"_"_q, u"inputPeerChannel"_q);
+		result.insert(u"channel_id"_q, double(data.vchannel_id().v));
+		result.insert(
+			u"access_hash"_q,
+			QString::number(data.vaccess_hash().v));
+	}, [&](const MTPDinputPeerUserFromMessage &data) {
+		result.insert(u"_"_q, u"inputPeerUserFromMessage"_q);
+		result.insert(u"peer"_q, InputPeerToJson(data.vpeer()));
+		result.insert(u"msg_id"_q, data.vmsg_id().v);
+		result.insert(u"user_id"_q, double(data.vuser_id().v));
+	}, [&](const MTPDinputPeerChannelFromMessage &data) {
+		result.insert(u"_"_q, u"inputPeerChannelFromMessage"_q);
+		result.insert(u"peer"_q, InputPeerToJson(data.vpeer()));
+		result.insert(u"msg_id"_q, data.vmsg_id().v);
+		result.insert(u"channel_id"_q, double(data.vchannel_id().v));
+	});
+	return result;
+}
+
+[[nodiscard]] QString InputPeerJsonText(not_null<PeerData*> peer) {
+	return QString::fromUtf8(
+		QJsonDocument(InputPeerToJson(peer->input())).toJson(
+			QJsonDocument::Compact));
+}
+
+[[nodiscard]] QJsonObject PeerJsonError(const MTP::Error &error) {
+	auto result = QJsonObject();
+	result.insert(u"_"_q, u"error"_q);
+	result.insert(u"type"_q, error.type());
+	result.insert(u"code"_q, error.code());
+	return result;
+}
+
+[[nodiscard]] QJsonObject PeerJsonNotFound() {
+	auto result = QJsonObject();
+	result.insert(u"_"_q, u"error"_q);
+	result.insert(u"type"_q, u"PEER_ID_INVALID"_q);
+	return result;
+}
+
+void RequestRawPeerJson(
+		not_null<SessionController*> controller,
+		not_null<PeerData*> peer,
+		Fn<void(QJsonObject)> done) {
+	const auto fail = crl::guard(controller, [=](const MTP::Error &error) {
+		done(PeerJsonError(error));
+	});
+	const auto chatsDone = crl::guard(
+		controller,
+		[=](const MTPmessages_Chats &result) {
+			result.match([&](const auto &data) {
+				const auto &list = data.vchats().v;
+				done(list.isEmpty()
+					? PeerJsonNotFound()
+					: MTP::details::TlObjectToJson(list.front()));
+			});
+		});
+	if (const auto user = peer->asUser()) {
+		controller->session().api().request(
+			MTPusers_GetUsers(
+				MTP_vector<MTPInputUser>(1, user->inputUser())
+			)
+		).done(crl::guard(controller, [=](
+				const MTPVector<MTPUser> &result) {
+			done(result.v.isEmpty()
+				? PeerJsonNotFound()
+				: MTP::details::TlObjectToJson(result.v.front()));
+		})).fail(std::move(fail)).send();
+	} else if (peer->asChat()) {
+		controller->session().api().request(
+			MTPmessages_GetChats(MTP_vector<MTPlong>(
+				1,
+				peerToBareMTPInt(peer->id))
+			)
+		).done(std::move(chatsDone)).fail(std::move(fail)).send();
+	} else if (const auto channel = peer->asChannel()) {
+		controller->session().api().request(
+			MTPchannels_GetChannels(MTP_vector<MTPInputChannel>(
+				1,
+				channel->inputChannel())
+			)
+		).done(std::move(chatsDone)).fail(std::move(fail)).send();
+	} else {
+		done(PeerJsonNotFound());
+	}
+}
+
+void Filler::addDeveloperActions() {
+	if (!_peer || _topic || _sublist) {
+		return;
+	}
+	const auto peer = _peer;
+	const auto controller = _controller;
+	const auto copy = [=](QString text) {
+		TextUtilities::SetClipboardText({ text });
+		controller->showToast(tr::lng_info_copied(tr::now));
+	};
+	const auto bareId = QString::number(
+		peer->id.value & PeerId::kChatTypeMask);
+	_addAction({ .isSeparator = true });
+	_addAction(tr::lng_info_copy_id(tr::now), [=] {
+		copy(bareId);
+	}, &st::menuIconCopy);
+	const auto chatId = peer->asUser()
+		? bareId
+		: peer->asChat()
+		? (u"-%1"_q.arg(bareId))
+		: (u"-100%1"_q.arg(bareId));
+	_addAction(tr::lng_info_copy_chat_id(tr::now), [=] {
+		copy(chatId);
+	}, &st::menuIconCopy);
+	_addAction(tr::lng_info_copy_input_peer(tr::now), [=] {
+		copy(InputPeerJsonText(peer));
+	}, &st::menuIconCopy);
+	_addAction(tr::lng_context_view_json_copy(tr::now), [=] {
+		RequestRawPeerJson(controller, peer, [=](QJsonObject json) {
+			copy(QString::fromUtf8(
+				QJsonDocument(std::move(json)).toJson(
+					QJsonDocument::Indented)));
+		});
+	}, &st::menuIconCopy);
+}
+
 void Filler::fillProfileActions() {
 	addTTLSubmenu(true);
 	addSupportInfo();
@@ -1969,6 +2112,7 @@ void Filler::fillProfileActions() {
 	addLeaveChat();
 	addDeleteContact();
 	addDeleteTopic();
+	addDeveloperActions();
 }
 
 void Filler::fillRepliesActions() {

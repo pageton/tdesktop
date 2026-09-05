@@ -19,7 +19,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/info_profile_icon.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
-#include "main/main_domain.h" // kMaxAccounts
 #include "ui/chat/chat_theme.h"
 #include "ui/chat/chat_style.h"
 #include "ui/controls/feature_list.h"
@@ -1655,20 +1654,6 @@ void DoubledLimitsPreviewBox(
 			premium,
 		});
 	}
-	const auto nextMax = session->domain().maxAccounts() + 1;
-	const auto till = (nextMax >= Main::Domain::kPremiumMaxAccounts)
-		? QString::number(Main::Domain::kPremiumMaxAccounts)
-		: (QString::number(nextMax) + QChar('+'));
-	entries.push_back({
-		tr::lng_premium_double_limits_subtitle_accounts(),
-		tr::lng_premium_double_limits_about_accounts(
-			lt_count,
-			rpl::single(float64(Main::Domain::kPremiumMaxAccounts)),
-			tr::rich),
-		Main::Domain::kMaxAccounts,
-		Main::Domain::kPremiumMaxAccounts,
-		till,
-	});
 	{
 		const auto premium = limits.similarChannelsPremium();
 		entries.push_back({
