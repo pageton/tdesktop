@@ -7,9 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "iv/editor/iv_editor_window.h"
 
+#include "platform/platform_specific.h"
 #include "ui/layers/layer_manager.h"
 
 #include <QtGui/QCloseEvent>
+#include <QtGui/QGuiApplication>
 
 #ifdef Q_OS_WIN
 #include <QtNetwork/QNetworkProxy>
@@ -46,6 +48,9 @@ Window::Window(QWidget *parent)
 , _layers(std::make_unique<Ui::LayerManager>(body())) {
 	_layers->setHideByBackgroundClick(true);
 	LiveWindows().push_back(this);
+	Platform::SetWindowAppId(
+		this,
+		QGuiApplication::desktopFileName() + u".article"_q);
 }
 
 Window::~Window() {

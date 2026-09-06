@@ -590,11 +590,15 @@ void PortalCheckScheme(
 
 // Applies a per-window application id on every (re)show of the window:
 // the shell surface / X window is (re)created by Qt on each show, and the
-// identity has to be restored right after that, before the window is
-// mapped to the window manager. On X11 the properties can be set
-// synchronously from the Show event, before the window gets mapped; on
-// Wayland the shell surface is created slightly later, so a single
-// deferred retry is scheduled per show.
+// identity has to be restored right after that. On X11 the properties
+// can be set synchronously from the Show event, before the window gets
+// mapped; on Wayland the shell surface only appears around the first
+// mapping and configuration of the window, an id set before that is
+// silently dropped, and at the Show event the QWindow often doesn't even
+// exist yet, so the id is re-applied on WinIdChange and on Expose events
+// (watching the handle as soon as it appears, with the widget's own
+// Expose as a fallback), which the compositor accepts as a regular
+// set_app_id update of an already mapped window.
 class WindowAppIdHelper final : public QObject {
 public:
 	WindowAppIdHelper(not_null<QWidget*> widget, QString appId)
@@ -607,35 +611,29 @@ public:
 
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override {
-		if (watched == _widget && event->type() == QEvent::Show) {
-			_retryAllowed = true;
+		const auto type = event->type();
+		if (type == QEvent::Show || type == QEvent::WinIdChange) {
+			apply();
+		} else if (type == QEvent::Expose && !IsX11()) {
 			apply();
 		}
 		return QObject::eventFilter(watched, event);
 	}
 
 private:
-	void scheduleApply() {
-		if (_applyScheduled || !_retryAllowed) {
-			return;
-		}
-		_retryAllowed = false;
-		_applyScheduled = true;
-		InvokeQueued(this, [=] {
-			_applyScheduled = false;
-			apply();
-		});
-	}
-
 	void apply() {
 		const auto handle = _widget->windowHandle();
 		if (!handle || !handle->handle()) {
-			scheduleApply();
-		} else if (IsX11()) {
+			return;
+		} else if (_filteredHandle.data() != handle) {
+			_filteredHandle = handle;
+			handle->installEventFilter(this);
+		}
+		if (IsX11()) {
 			applyX11(handle);
 #ifdef TDESKTOP_WAYLAND_APP_ID
-		} else if (!applyWayland(handle)) {
-			scheduleApply();
+		} else {
+			applyWayland(handle);
 #endif // TDESKTOP_WAYLAND_APP_ID
 		}
 	}
@@ -693,25 +691,22 @@ private:
 	}
 
 #ifdef TDESKTOP_WAYLAND_APP_ID
-	// Returns false if the shell surface is not created yet and the id
-	// has to be applied from a deferred retry.
-	[[nodiscard]] bool applyWayland(not_null<QWindow*> window) {
+	void applyWayland(not_null<QWindow*> window) {
 		const auto waylandWindow = dynamic_cast<
 			QtWaylandClient::QWaylandWindow*>(window->handle());
 		if (!waylandWindow) {
-			return true;
+			return;
 		} else if (const auto shellSurface = waylandWindow->shellSurface()) {
 			shellSurface->setAppId(_appId);
-			return true;
 		}
-		return false;
+		// Without a shell surface yet the id is reapplied on the window
+		// handle's first Expose event, after the window is mapped.
 	}
 #endif // TDESKTOP_WAYLAND_APP_ID
 
 	not_null<QWidget*> _widget;
 	const QString _appId;
-	bool _applyScheduled = false;
-	bool _retryAllowed = false;
+	QPointer<QWindow> _filteredHandle;
 
 };
 
