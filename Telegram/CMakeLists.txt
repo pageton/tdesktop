@@ -828,6 +828,8 @@ PRIVATE
     devtools/devtools_rpc_inspector.h
     devtools/devtools_rpc_log.cpp
     devtools/devtools_rpc_log.h
+    devtools/devtools_rpc_scheme.cpp
+    devtools/devtools_rpc_scheme.h
     dialogs/dialogs_community_chats_list.cpp
     dialogs/dialogs_community_chats_list.h
     dialogs/dialogs_community_requestable_list.cpp

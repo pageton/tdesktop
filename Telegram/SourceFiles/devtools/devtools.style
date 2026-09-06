@@ -12,10 +12,14 @@ rpcInspectorRowPadding: margins(12px, 5px, 12px, 5px);
 rpcInspectorMetaFont: font(12px);
 rpcInspectorField: InputField(defaultInputField) {
 	heightMin: 160px;
-	heightMax: 420px;
+	heightMax: 160px;
 }
-rpcInspectorListHeight: 400px;
 rpcInspectorStatusSize: 8px;
+rpcInspectorLogWidth: 340px;
+rpcInspectorWindowSize: size(880px, 620px);
+rpcInspectorAnchorGap: 12px;
+rpcInspectorSuggestWidth: 360px;
+rpcInspectorSuggestRow: 28px;
 
 rpcInspectorDetailsTitleStyle: TextStyle(defaultTextStyle) {
 	font: font(11px semibold);
