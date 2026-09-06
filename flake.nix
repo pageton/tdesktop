@@ -122,10 +122,16 @@
                   echo "    git submodule update --init --recursive" >&2
                 fi
 
-                # Public API credentials shared by distro builds; get your own
-                # for anything user-facing (docs/api_credentials.md).
-                export TDESKTOP_API_ID=611335
-                export TDESKTOP_API_HASH=d524b414d21f4d37f08684c1df41ac9c
+                # We're allowed to use the API ID of the Snap package —
+                # the same credentials nixpkgs passes to its
+                # telegram-desktop build (lib.cmakeFeature
+                # TDESKTOP_API_ID/TDESKTOP_API_HASH in
+                # pkgs/applications/networking/instant-messengers/
+                # telegram/telegram-desktop/unwrapped.nix). Export your own
+                # pair for anything user-facing; these defaults only apply
+                # when the environment does not provide one.
+                export TDESKTOP_API_ID="''${TDESKTOP_API_ID:-611335}"
+                export TDESKTOP_API_HASH="''${TDESKTOP_API_HASH:-d524b414d21f4d37f08684c1df41ac9c}"
 
                 # Compiler cache: when a build is interrupted, Ninja's
                 # .ninja_log loses its tail and the next run re-plans the
