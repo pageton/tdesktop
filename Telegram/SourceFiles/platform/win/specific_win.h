@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "platform/platform_specific.h"
+#include "settings.h"
 
 #include <windows.h>
 
