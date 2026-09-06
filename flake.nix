@@ -32,9 +32,12 @@
             # Qt Quick support: optional in tdesktop's CMake, but present in
             # the official builds. qtimageformats is needed so CMake can find
             # the WebP codec plugin (Qt6::QWebpPlugin) for the qt.conf +
-            # qt-plugins tree generated next to the binary.
+            # qt-plugins tree generated next to the binary. pango provides
+            # the pangocairo pkg-config module required by upstream's
+            # cmake/external/pango (MicroTeX text rendering).
             packages = [
               pkgs.ccache
+              pkgs.pango
               pkgs.qt6.qtdeclarative
               pkgs.qt6.qtimageformats
             ];
