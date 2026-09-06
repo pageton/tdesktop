@@ -1781,6 +1781,7 @@ void ShowRpcInspector(not_null<Window::SessionController*> controller) {
 		*panel = base::make_unique_q<Ui::SeparatePanel>(
 			Ui::SeparatePanelArgs{});
 		(*panel)->setTitle(rpl::single(u"RPC Inspector"_q));
+		(*panel)->setWindowTitle(u"RPC Inspector"_q);
 		(*panel)->setInnerSize(st::rpcInspectorWindowSize, true);
 		(*panel)->showInner(base::make_unique_q<InspectorInner>(
 			(*panel).get(),
