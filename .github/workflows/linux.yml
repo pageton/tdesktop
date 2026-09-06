@@ -44,6 +44,10 @@ on:
       - 'Telegram/configure.bat'
       - 'Telegram/Telegram.plist'
 
+env:
+  TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+  TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+
 jobs:
 
   linux:
@@ -158,6 +162,7 @@ jobs:
           -D TDESKTOP_API_TEST=ON \
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF \
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF \
+          ${TDESKTOP_API_ID:+-D TDESKTOP_API_ID=$TDESKTOP_API_ID -D TDESKTOP_API_HASH=$TDESKTOP_API_HASH} \
           $DEFINE
 
       - name: Count ccache misses.
