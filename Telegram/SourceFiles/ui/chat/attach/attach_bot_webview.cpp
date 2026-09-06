@@ -1233,7 +1233,7 @@ Panel::Panel(Args &&args)
 	} else {
 		::Platform::SetWindowAppId(
 			_widget.get(),
-			QGuiApplication::desktopFileName() + u".webapp"_q);
+			QGuiApplication::desktopFileName() + u".miniapp"_q);
 	}
 	_widget->setWindowFlag(Qt::WindowStaysOnTopHint, false);
 	_widget->setInnerSize(st::botWebViewPanelSize, true);
