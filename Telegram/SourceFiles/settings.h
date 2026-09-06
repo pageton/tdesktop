@@ -10,6 +10,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/integration.h"
 #include "ui/style/style_core.h"
 
+#include <QtCore/QByteArray>
+#include <QtCore/QDir>
+#include <QtCore/QFile>
+#include <QtCore/QList>
+#include <QtCore/QPair>
+#include <QtCore/QString>
+#include <QtCore/QUrl>
+#include <QtCore/QVector>
+
 #define DeclareReadSetting(Type, Name) extern Type g##Name; \
 inline const Type &c##Name() { \
 	return g##Name; \
