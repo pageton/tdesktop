@@ -26,6 +26,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_stories.h"
 #include "data/data_user.h"
+#include "base/options.h"
+#include "devtools/devtools_rpc_inspector.h"
+#include "devtools/devtools_rpc_log.h"
 #include "info/info_memento.h"
 #include "info/profile/info_profile_badge.h"
 #include "settings/settings_common.h"
@@ -746,6 +749,15 @@ void MainMenu::setupMenu() {
 	)->setClickedCallback([=] {
 		controller->showSettings();
 	});
+
+	if (base::options::value<bool>(Dev::Rpc::kOptionRpcInspector)) {
+		addAction(
+			rpl::single(u"RPC Inspector"_q),
+			{ &st::menuIconNetwork }
+		)->setClickedCallback([=] {
+			Dev::Rpc::ShowRpcInspector(controller);
+		});
+	}
 
 	_nightThemeToggle = addAction(
 		tr::lng_menu_night_mode(),
