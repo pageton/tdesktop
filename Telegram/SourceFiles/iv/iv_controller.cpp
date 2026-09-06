@@ -14,6 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/file_utilities.h"
 #include "lang/lang_keys.h"
 #include "platform/platform_specific.h"
+#include "settings.h"
 #include "ui/chat/attach/attach_bot_webview.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
