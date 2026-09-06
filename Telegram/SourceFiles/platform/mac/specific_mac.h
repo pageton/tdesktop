@@ -9,6 +9,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "platform/platform_specific.h"
 #include "platform/mac/specific_mac_p.h"
+#include "settings.h"
+
+#include <QtCore/QFile>
 
 namespace Platform {
 
