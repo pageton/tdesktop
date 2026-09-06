@@ -8,14 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "devtools/devtools_rpc_inspector.h"
 
 #include "base/options.h"
+#include "base/unique_qptr.h"
 #include "devtools/devtools_rpc_log.h"
-#include "lang/lang_keys.h"
+#include "devtools/devtools_rpc_scheme.h"
 #include "main/main_session.h"
-#include "mtproto/mtproto_dc_options.h"
 #include "mtproto/mtproto_response.h"
+#include "platform/platform_specific.h"
 #include "scheme.h"
 #include "scheme-tl_json.h"
-#include "ui/layers/box_content.h"
 #include "ui/boxes/confirm_box.h"
 #include "ui/painter.h"
 #include "ui/text/text_utilities.h"
@@ -24,11 +24,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/checkbox.h"
 #include "ui/widgets/fields/input_field.h"
-#include "ui/widgets/fields/number_input.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/scroll_area.h"
 #include "ui/widgets/selecting_scroll.h"
+#include "ui/widgets/separate_panel.h"
 #include "ui/wrap/vertical_layout.h"
+#include "window/window_controller.h"
 #include "window/window_session_controller.h"
 #include "styles/style_boxes.h"
 #include "styles/style_devtools.h"
@@ -36,9 +37,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "styles/style_widgets.h"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QJsonValue>
+#include <QtCore/QRegularExpression>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QTextBlock>
+#include <QtWidgets/QTextEdit>
 
+#include <algorithm>
 #include <array>
 
 namespace Dev::Rpc {
@@ -48,11 +56,38 @@ constexpr auto kMaxInlineJson = 256 * 1024;
 
 struct Query {
 	QString text;
+	std::vector<qint64> ids;
 	std::optional<int> dc;
 	std::optional<bool> errors;
 	std::optional<int> minDuration;
 	std::optional<int> maxDuration;
+
+	[[nodiscard]] bool empty() const {
+		return text.isEmpty()
+			&& ids.empty()
+			&& !dc.has_value()
+			&& !errors.has_value()
+			&& !minDuration.has_value()
+			&& !maxDuration.has_value();
+	}
 };
+
+// Parse a bare id token: plain numbers as-is, "-100"-prefixed channel
+// ids as the bare channel id (the -100 form never appears in TL bodies).
+[[nodiscard]] std::optional<qint64> ParseIdToken(const QString &token) {
+	auto digits = token;
+	if (digits.startsWith(u"-100")) {
+		digits = digits.mid(4);
+	} else if (digits.startsWith(u'-')) {
+		digits = digits.mid(1);
+	}
+	if (digits.isEmpty()
+		|| digits.size() > 19
+		|| !ranges::all_of(digits, [](QChar c) { return c.isDigit(); })) {
+		return std::nullopt;
+	}
+	return digits.toLongLong();
+}
 
 [[nodiscard]] Query ParseQuery(const QString &text) {
 	auto result = Query();
@@ -79,6 +114,8 @@ struct Query {
 				const auto millis = ms ? value : value * 1000;
 				(bounded ? result.minDuration : result.maxDuration) = millis;
 			}
+		} else if (const auto id = ParseIdToken(token)) {
+			result.ids.push_back(*id);
 		} else {
 			freeText.push_back(token);
 		}
@@ -87,12 +124,42 @@ struct Query {
 	return result;
 }
 
+// Search the raw TL wire for the id as an int32 prime, or as the low/high
+// prime pair of an int64. This finds the id in any field of the request
+// or response without decoding them.
+[[nodiscard]] bool BodyContainsId(const QByteArray &body, qint64 id) {
+	if (id == 0 || body.size() < int(sizeof(quint32))) {
+		return false;
+	}
+	const auto primes = reinterpret_cast<const quint32*>(body.constData());
+	const auto count = int(body.size() / sizeof(quint32));
+	const auto lo = quint32(quint64(id) & 0xFFFFFFFFULL);
+	const auto hi = quint32(quint64(id) >> 32);
+	for (auto i = 0; i != count; ++i) {
+		if (primes[i] != lo) {
+			continue;
+		} else if (hi == 0) {
+			return true;
+		} else if (i + 1 < count && primes[i + 1] == hi) {
+			return true;
+		}
+	}
+	return false;
+}
+
 [[nodiscard]] bool Matches(const Event &event, const Query &query) {
 	if (!query.text.isEmpty()
 		&& !event.method.contains(query.text, Qt::CaseInsensitive)
 		&& !event.errorType.contains(query.text, Qt::CaseInsensitive)) {
 		return false;
-	} else if (query.dc && query.dc != MTP::BareDcId(event.dcId)) {
+	}
+	for (const auto id : query.ids) {
+		if (!BodyContainsId(event.request, id)
+			&& !BodyContainsId(event.response, id)) {
+			return false;
+		}
+	}
+	if (query.dc && query.dc != MTP::BareDcId(event.dcId)) {
 		return false;
 	} else if (query.errors && event.status != Status::Failed) {
 		return false;
@@ -158,6 +225,51 @@ void CopyText(const QString &text) {
 	});
 }
 
+[[nodiscard]] uint64 FindEventId(mtpRequestId requestId) {
+	for (const auto &event : Snapshot()) {
+		if (event.requestId == requestId) {
+			return event.id;
+		}
+	}
+	return 0;
+}
+
+[[nodiscard]] QString StatusText(Status status) {
+	switch (status) {
+	case Status::Succeeded: return u"Success"_q;
+	case Status::Failed: return u"Failed"_q;
+	case Status::Cancelled: return u"Cancelled"_q;
+	default: return u"Pending"_q;
+	}
+}
+
+class TextButton final : public Ui::AbstractButton {
+public:
+	TextButton(QWidget *parent, const QString &text)
+	: Ui::AbstractButton(parent)
+	, _text(text) {
+		resize(
+			st::semiboldFont->width(_text) + 2 * st::rpcInspectorRowPadding.left(),
+			st::semiboldFont->height);
+	}
+
+protected:
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		p.setFont(st::semiboldFont);
+		p.setPen(isOver()
+			? st::windowActiveTextFg
+			: st::windowSubTextFg);
+		p.drawText(
+			QPoint(st::rpcInspectorRowPadding.left(), st::semiboldFont->ascent),
+			_text);
+	}
+
+private:
+	QString _text;
+
+};
+
 class TabButton final : public Ui::AbstractButton {
 public:
 	TabButton(QWidget *parent, const QString &text)
@@ -173,16 +285,16 @@ public:
 		update();
 	}
 
-	protected:
-		void paintEvent(QPaintEvent *e) override {
-			auto p = Painter(this);
-			p.setFont(_active ? st::semiboldFont : st::boxTextFont);
-			p.setPen(_active
-				? st::windowActiveTextFg
-				: (isOver() ? st::windowFg : st::windowSubTextFg));
-			p.drawText(
-				QPoint(st::rpcInspectorRowPadding.left(), st::semiboldFont->ascent),
-				_text);
+protected:
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		p.setFont(_active ? st::semiboldFont : st::boxTextFont);
+		p.setPen(_active
+			? st::windowActiveTextFg
+			: (isOver() ? st::windowFg : st::windowSubTextFg));
+		p.drawText(
+			QPoint(st::rpcInspectorRowPadding.left(), st::semiboldFont->ascent),
+			_text);
 		if (_active) {
 			p.fillRect(
 				st::rpcInspectorRowPadding.left(),
@@ -201,15 +313,23 @@ private:
 
 class EventRow final : public Ui::AbstractButton {
 public:
-	EventRow(QWidget *parent, Event data)
+	EventRow(QWidget *parent, Event data, bool selected)
 	: Ui::AbstractButton(parent)
-	, _data(std::move(data)) {
+	, _data(std::move(data))
+	, _selected(selected) {
 		resize(parent->width(), st::rpcInspectorRowHeight);
 	}
 
 	void updateData(Event data) {
 		_data = std::move(data);
 		update();
+	}
+
+	void setSelected(bool selected) {
+		if (_selected != selected) {
+			_selected = selected;
+			update();
+		}
 	}
 
 	[[nodiscard]] uint64 eventId() const {
@@ -219,11 +339,19 @@ public:
 protected:
 	void paintEvent(QPaintEvent *e) override {
 		auto p = Painter(this);
-		if (isOver() || isDown()) {
+		if (_selected) {
+			p.fillRect(rect(), st::windowBgOver);
+			p.fillRect(
+				0,
+				0,
+				st::lineWidth * 3,
+				height(),
+				st::windowActiveTextFg);
+		} else if (isOver() || isDown()) {
 			p.fillRect(rect(), st::windowBgOver);
 		}
 		const auto padding = st::rpcInspectorRowPadding;
-		const auto left = padding.left();
+		const auto left = padding.left() + st::lineWidth * 3;
 		const auto top = padding.top();
 		const auto textWidth = width()
 			- left
@@ -288,14 +416,16 @@ protected:
 
 private:
 	Event _data;
+	bool _selected = false;
 
 };
 
+// The scrolling row container inside the log pane. Rows are newest first.
 class HistoryList final : public Ui::RpWidget {
 public:
-	HistoryList(QWidget *parent, Fn<void(uint64)> openDetails)
+	HistoryList(QWidget *parent, Fn<void(uint64)> openEvent)
 	: Ui::RpWidget(parent)
-	, _openDetails(std::move(openDetails)) {
+	, _openEvent(std::move(openEvent)) {
 		Rebuild();
 	}
 
@@ -326,59 +456,77 @@ public:
 		return false;
 	}
 
+	void setSelected(uint64 id) {
+		if (_selected == id) {
+			return;
+		}
+		_selected = id;
+		for (const auto &row : _rows) {
+			row->setSelected(row->eventId() == id);
+		}
+	}
+
 	void clearAll() {
+		_selected = 0;
 		Rebuild();
 	}
 
-	protected:
-		void paintEvent(QPaintEvent *) override {
-			auto p = Painter(this);
-			if (!_rows.empty()) {
-				return;
-			}
-			const auto padding = st::rpcInspectorRowPadding;
-			p.setFont(st::boxTextFont);
-			p.setPen(st::windowSubTextFg);
-			p.drawText(
-				QRect(
-					padding.left(),
-					0,
-					width() - padding.left() - padding.right(),
-					height()),
-				Qt::AlignHCenter | Qt::AlignVCenter,
-				Recording()
-					? u"No RPC calls captured yet."_q
-					: u"Recording is off, enable it to capture calls."_q);
+protected:
+	void paintEvent(QPaintEvent *) override {
+		auto p = Painter(this);
+		if (!_rows.empty()) {
+			return;
 		}
+		const auto padding = st::rpcInspectorRowPadding;
+		p.setFont(st::boxTextFont);
+		p.setPen(st::windowSubTextFg);
+		p.drawText(
+			QRect(
+				padding.left(),
+				0,
+				width() - padding.left() - padding.right(),
+				height()),
+			Qt::AlignHCenter | Qt::AlignVCenter,
+			!Recording()
+				? u"Recording is off, enable it to capture calls."_q
+				: (!_query.empty()
+					? u"No RPC calls match the filter."_q
+					: u"No RPC calls captured yet."_q));
+	}
 
-		int resizeGetHeight(int newWidth) override {
-			RelayoutRows(newWidth);
-			return std::max(
-				int(_rows.size()) * st::rpcInspectorRowHeight,
-				st::rpcInspectorListHeight);
-		}
+	int resizeGetHeight(int newWidth) override {
+		RelayoutRows(newWidth);
+		return std::max(
+			int(_rows.size()) * st::rpcInspectorRowHeight,
+			st::rpcInspectorRowHeight * 4);
+	}
 
-	private:
-		void Rebuild() {
-			for (const auto &row : _rows) {
-				delete row;
-			}
-			_rows.clear();
-			for (const auto &event : Snapshot()) {
-				if (Matches(event, _query)) {
-					Prepend(event);
-				}
-			}
-			resizeToWidth(width());
+private:
+	void Rebuild() {
+		for (const auto &row : _rows) {
+			delete row;
 		}
+		_rows.clear();
+		for (const auto &event : Snapshot()) {
+			if (Matches(event, _query)) {
+				Prepend(event);
+			}
+		}
+		resizeToWidth(width());
+	}
 
-		void Prepend(const Event &event) {
-			const auto row = Ui::CreateChild<EventRow>(this, event);
-			row->setClickedCallback([=] {
-				_openDetails(event.id);
-			});
-			_rows.insert(_rows.begin(), row);
-		}
+	void Prepend(const Event &event) {
+		const auto row = Ui::CreateChild<EventRow>(
+			this,
+			event,
+			event.id == _selected);
+		row->setClickedCallback([=] {
+			setSelected(event.id);
+			_openEvent(event.id);
+		});
+		row->show();
+		_rows.insert(_rows.begin(), row);
+	}
 
 	void RelayoutRows(int width) {
 		auto y = 0;
@@ -389,19 +537,21 @@ public:
 	}
 
 	Query _query;
+	uint64 _selected = 0;
 	std::vector<EventRow*> _rows;
-	Fn<void(uint64)> _openDetails;
+	Fn<void(uint64)> _openEvent;
 
 };
 
-class HistoryPane final : public Ui::RpWidget {
+// Left column of the inspector: toolbar over the live event log.
+class EventLog final : public Ui::RpWidget {
 public:
-	HistoryPane(QWidget *parent, Fn<void(uint64)> openDetails)
+	EventLog(QWidget *parent)
 	: Ui::RpWidget(parent) {
 		_search = Ui::CreateChild<Ui::InputField>(
 			this,
 			st::defaultInputField,
-			rpl::single(u"Filter: text, dc:4, error, ok, >500ms, <1s"_q));
+			rpl::single(u"Filter: text, id, dc:4, error, ok, >500ms, <1s"_q));
 		_recording = Ui::CreateChild<Ui::Checkbox>(
 			this,
 			u"Recording"_q,
@@ -414,11 +564,12 @@ public:
 		_scroll = Ui::CreateChild<Ui::ScrollArea>(this, st::boxScroll);
 		_list = _scroll->setOwnedWidget(object_ptr<HistoryList>(
 			_scroll,
-			std::move(openDetails)));
+			[=](uint64 id) { _selections.fire_copy(id); }));
 
 		_search->changes(
 		) | rpl::on_next([=] {
 			_list->applyQuery(_search->getLastText());
+			Layout(height());
 		}, lifetime());
 
 		_recording->checkedChanges(
@@ -429,12 +580,29 @@ public:
 		_clear->setClickedCallback([=] {
 			Clear();
 			_list->clearAll();
+			_cleared.fire({});
 		});
 
 		_search->show();
 		_recording->show();
 		_clear->show();
 		_scroll->show();
+	}
+
+	[[nodiscard]] rpl::producer<uint64> selections() const {
+		return _selections.events();
+	}
+
+	[[nodiscard]] rpl::producer<> clears() const {
+		return _cleared.events();
+	}
+
+	void select(uint64 id) {
+		_list->setSelected(id);
+	}
+
+	void scrollToTop() {
+		_scroll->scrollToY(0);
 	}
 
 	void eventUpdated(uint64 id) {
@@ -444,66 +612,262 @@ public:
 	}
 
 protected:
-	int resizeGetHeight(int newWidth) override {
+	void resizeEvent(QResizeEvent *e) override {
+		Layout(height());
+	}
+
+private:
+	void Layout(int newHeight) {
 		if (isHidden()) {
-			return 0;
+			return;
 		}
 		const auto padding = st::rpcInspectorRowPadding;
 		const auto top = padding.top();
 		const auto fieldHeight = st::defaultInputField.heightMin;
-		const auto rowHeight = std::max({
-			fieldHeight,
-			_recording->height(),
-			_clear->height(),
-		}) + 2 * top;
-		const auto controlsWidth = _recording->width()
-			+ _clear->width()
-			+ 3 * padding.left();
-
+		auto y = top;
 		_search->setGeometry(
 			padding.left(),
-			top,
-			newWidth - padding.left() - padding.right() - controlsWidth,
+			y,
+			width() - padding.left() - padding.right(),
 			fieldHeight);
+		y += fieldHeight + top;
+		const auto rowHeight = std::max(_recording->height(), _clear->height());
 		_recording->moveToLeft(
-			newWidth - padding.right() - _clear->width()
-				- padding.left() - _recording->width(),
-			top + (rowHeight - 2 * top - _recording->height()) / 2);
-		_clear->moveToLeft(
-			newWidth - padding.right() - _clear->width(),
-			top + (rowHeight - 2 * top - _clear->height()) / 2);
-
-		const auto listTop = top + rowHeight + padding.top();
-		_scroll->setGeometry(
-			0,
-			listTop,
-			newWidth,
-			st::rpcInspectorListHeight);
-		_list->resizeToWidth(newWidth - st::boxScroll.width);
+			padding.left(),
+			y + (rowHeight - _recording->height()) / 2);
+		_clear->moveToRight(
+			padding.right(),
+			y + (rowHeight - _clear->height()) / 2);
+		y += rowHeight + top;
+		_scroll->setGeometry(0, y, width(), newHeight - y - padding.bottom());
+		_list->resizeToWidth(width() - st::boxScroll.width);
 		_scroll->updateBars();
-
-		resize(newWidth, listTop + st::rpcInspectorListHeight + padding.bottom());
-		return height();
 	}
 
-private:
 	Ui::InputField *_search = nullptr;
 	Ui::Checkbox *_recording = nullptr;
 	Ui::RoundButton *_clear = nullptr;
 	Ui::ScrollArea *_scroll = nullptr;
 	HistoryList *_list = nullptr;
+	rpl::event_stream<uint64> _selections;
+	rpl::event_stream<> _cleared;
 
 };
 
-class InvokePane final : public Ui::RpWidget {
+// Non-focus-stealing completion list, shown near the text cursor. Lives
+// as a child widget, so the keyboard stays in the request field; arrow
+// keys are forwarded from it through Composer::eventFilter.
+class CompletionPopup final : public Ui::RpWidget {
 public:
-	InvokePane(
+	struct Item {
+		QString text;
+		bool field = false;
+	};
+
+	static constexpr auto kMaxRows = 8;
+
+	CompletionPopup(QWidget *parent, Fn<void(Item)> accept)
+	: Ui::RpWidget(parent)
+	, _accept(std::move(accept)) {
+		hide();
+	}
+
+	void showAt(QRect caret, std::vector<Item> items) {
+		_items = std::move(items);
+		_selected = 0;
+		_first = 0;
+		if (_items.empty()) {
+			hide();
+			return;
+		}
+		const auto parent = parentWidget();
+		const auto shown = int(std::min(
+			_items.size(),
+			size_t(kMaxRows)));
+		resize(
+			std::min(
+				st::rpcInspectorSuggestWidth,
+				parent->width() - 2 * st::rpcInspectorRowPadding.left()),
+			shown * st::rpcInspectorSuggestRow + 2 * st::lineWidth);
+		const auto pad = st::rpcInspectorRowPadding.left();
+		const auto x = std::clamp(
+			caret.x(),
+			pad,
+			std::max(parent->width() - width() - pad, pad));
+		const auto below = caret.bottom() + 2;
+		const auto y = (below + height() > parent->height() - pad)
+			? std::max(caret.y() - height() - 2, pad)
+			: below;
+		move(x, y);
+		raise();
+		show();
+		update();
+	}
+
+	[[nodiscard]] bool active() const {
+		return isVisible() && !_items.empty();
+	}
+
+	// Returns true if the key was consumed.
+	[[nodiscard]] bool handleKey(int key) {
+		if (!active()) {
+			return false;
+		}
+		switch (key) {
+		case Qt::Key_Up: moveSelection(-1); return true;
+		case Qt::Key_Down: moveSelection(1); return true;
+		case Qt::Key_PageUp: moveSelection(-kMaxRows); return true;
+		case Qt::Key_PageDown: moveSelection(kMaxRows); return true;
+		case Qt::Key_Enter:
+		case Qt::Key_Return:
+		case Qt::Key_Tab: acceptSelected(); return true;
+		case Qt::Key_Escape: hide(); return true;
+		default: return false;
+		}
+	}
+
+protected:
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		p.fillRect(rect(), st::windowBg);
+		p.fillRect(0, 0, width(), st::lineWidth, st::shadowFg);
+		p.fillRect(0, height() - st::lineWidth, width(), st::lineWidth, st::shadowFg);
+		p.fillRect(0, 0, st::lineWidth, height(), st::shadowFg);
+		p.fillRect(width() - st::lineWidth, 0, st::lineWidth, height(), st::shadowFg);
+		const auto row = st::rpcInspectorSuggestRow;
+		const auto pad = st::rpcInspectorRowPadding.left();
+		const auto top = st::lineWidth;
+		p.setFont(st::boxTextFont);
+		for (auto i = _first; i <= lastShown(); ++i) {
+			const auto y = top + (i - _first) * row;
+			if (i == _selected) {
+				p.fillRect(
+					st::lineWidth,
+					y,
+					width() - 2 * st::lineWidth,
+					row,
+					st::windowBgOver);
+			}
+			p.setPen(i == _selected ? st::windowFg : st::boxTextFg);
+			p.drawText(
+				QPoint(pad, y + (row - st::boxTextFont->height) / 2
+					+ st::boxTextFont->ascent),
+				st::boxTextFont->elided(_items[i].text, width() - 2 * pad));
+		}
+	}
+
+	void mousePressEvent(QMouseEvent *e) override {
+		const auto row = _first
+			+ (e->pos().y() - st::lineWidth) / st::rpcInspectorSuggestRow;
+		if (row >= _first && row <= lastShown()) {
+			_selected = row;
+			acceptSelected();
+		}
+	}
+
+	void wheelEvent(QWheelEvent *e) override {
+		moveSelection(e->angleDelta().y() > 0 ? -3 : 3);
+	}
+
+private:
+	[[nodiscard]] int lastShown() const {
+		return std::min(int(_items.size()), _first + kMaxRows) - 1;
+	}
+
+	void moveSelection(int delta) {
+		_selected = std::clamp(
+			_selected + delta,
+			0,
+			int(_items.size()) - 1);
+		if (_selected < _first) {
+			_first = _selected;
+		} else if (_selected > lastShown()) {
+			_first = _selected - (kMaxRows - 1);
+		}
+		update();
+	}
+
+	void acceptSelected() {
+		const auto item = _items[_selected];
+		hide();
+		_accept(item);
+	}
+
+	std::vector<Item> _items;
+	int _selected = 0;
+	int _first = 0;
+	Fn<void(Item)> _accept;
+
+};
+
+[[nodiscard]] QJsonObject TemplateConstructor(
+	const QString &constructorName,
+	int depth);
+
+// A conservative placeholder value for one TL field: strings and quoted
+// 64-bit ids (access_hash is lossless as a string), empty vectors, and
+// nested constructor skeletons up to two levels deep.
+[[nodiscard]] QJsonValue TemplateValueFor(
+		const QString &type,
+		const QString &name,
+		int depth) {
+	if (type == u"string" || type == u"bytes") {
+		return QJsonValue(QString());
+	} else if (type == u"Bool") {
+		return QJsonValue(false);
+	} else if (type == u"int"
+		|| type == u"long"
+		|| type == u"int32"
+		|| type == u"int53"
+		|| type == u"int64"
+		|| type == u"double") {
+		return name.contains(u"access_hash")
+			? QJsonValue(QString())
+			: QJsonValue(0);
+	} else if (type.startsWith(u"Vector<") || type.startsWith(u"vector<")) {
+		return QJsonValue(QJsonArray());
+	} else if (depth >= 2) {
+		return QJsonValue(QString());
+	}
+	const auto candidates = ConstructorsOfType(type);
+	if (candidates.empty()) {
+		return QJsonValue(QString());
+	}
+	return TemplateConstructor(candidates.front()->name, depth + 1);
+}
+
+[[nodiscard]] QJsonObject TemplateConstructor(
+		const QString &constructorName,
+		int depth) {
+	auto object = QJsonObject();
+	object.insert(u"_"_q, constructorName);
+	if (const auto meta = FindConstructor(constructorName)) {
+		for (const auto &field : meta->fields) {
+			if (field.type == u"true") {
+				// Optional boolean flags must stay absent: their mere
+				// presence flips the corresponding flag bit.
+				continue;
+			}
+			object.insert(
+				field.name,
+				TemplateValueFor(field.type, field.name, depth));
+		}
+	}
+	return object;
+}
+
+// Right column, top: TL JSON request composer with live status line.
+class Composer final : public Ui::RpWidget {
+public:
+	Composer(
 		QWidget *parent,
 		not_null<Window::SessionController*> window,
-		Fn<void()> showHistory)
+		not_null<Ui::SeparatePanel*> panel,
+		Fn<void(uint64)> openEvent)
 	: Ui::RpWidget(parent)
 	, _window(window)
-	, _showHistory(std::move(showHistory)) {
+	, _panel(panel)
+	, _openEvent(std::move(openEvent)) {
 		_label = Ui::CreateChild<Ui::FlatLabel>(
 			this,
 			u"Request (TL JSON)"_q,
@@ -544,6 +908,22 @@ public:
 			invoke();
 		});
 
+		_popup = Ui::CreateChild<CompletionPopup>(
+			this,
+			[=](CompletionPopup::Item item) { acceptCompletion(item); });
+		const auto edit = _request->rawTextEdit();
+		edit->installEventFilter(this);
+		QObject::connect(
+			edit,
+			&QTextEdit::cursorPositionChanged,
+			[=] {
+				crl::on_main(crl::guard(this, [=] { updateSuggestions(); }));
+			});
+		_request->changes(
+		) | rpl::on_next([=] {
+			crl::on_main(crl::guard(this, [=] { updateSuggestions(); }));
+		}, lifetime());
+
 		_label->show();
 		_layer->show();
 		_request->show();
@@ -554,14 +934,25 @@ public:
 	}
 
 protected:
-	int resizeGetHeight(int newWidth) override {
-		if (isHidden()) {
-			return 0;
+	bool eventFilter(QObject *obj, QEvent *e) override {
+		if (_popup
+			&& obj == _request->rawTextEdit()
+			&& e->type() == QEvent::KeyPress) {
+			const auto event = static_cast<QKeyEvent*>(e);
+			if (_popup->handleKey(event->key())) {
+				return true;
+			} else if (handleEditorKey(event)) {
+				return true;
+			}
 		}
+		return Ui::RpWidget::eventFilter(obj, e);
+	}
+
+	int resizeGetHeight(int newWidth) override {
 		const auto padding = st::rpcInspectorRowPadding;
 		auto y = padding.top();
 		_label->moveToLeft(padding.left(), y);
-		_layer->moveToRight(padding.right(), y);
+		_layer->moveToLeft(newWidth - padding.right() - _layer->width(), y);
 		y += _label->height() + padding.top();
 		_request->resizeToWidth(newWidth - padding.left() - padding.right());
 		_request->moveToLeft(padding.left(), y);
@@ -581,8 +972,8 @@ protected:
 		_dc->moveToLeft(
 			padding.left() + _auto->width() + padding.left(),
 			y + (controlsHeight - _dc->height()) / 2);
-		_invoke->moveToRight(
-			padding.right(),
+		_invoke->moveToLeft(
+			newWidth - padding.right() - _invoke->width(),
 			y + (controlsHeight - _invoke->height()) / 2);
 		y += controlsHeight + padding.top();
 
@@ -594,6 +985,214 @@ protected:
 	}
 
 private:
+	[[nodiscard]] static bool IsWordChar(QChar c) {
+		return c.isLetterOrNumber() || c == u'.' || c == u'_';
+	}
+
+	[[nodiscard]] static std::pair<int, int> WordBounds(
+			const QString &text,
+			int position) {
+		auto start = position;
+		auto end = position;
+		while (start > 0 && IsWordChar(text[start - 1])) {
+			--start;
+		}
+		while (end < text.size() && IsWordChar(text[end])) {
+			++end;
+		}
+		return { start, end };
+	}
+
+	void updateSuggestions() {
+		const auto edit = _request->rawTextEdit();
+		const auto text = edit->toPlainText();
+		const auto position = edit->textCursor().position();
+		const auto [start, end] = WordBounds(text, position);
+		const auto word = text.mid(start, end - start);
+		if (word.isEmpty()) {
+			_popup->hide();
+			return;
+		}
+		static const auto InCtorValue = QRegularExpression(
+			u"\"_\"\\s*:\\s*\"[^\"]*$"_q);
+		static const auto CtorName = QRegularExpression(
+			u"\"_\"\\s*:\\s*\"([A-Za-z0-9_.]*)"_q);
+		const auto inCtorValue = InCtorValue.match(
+			text.left(position)).hasMatch();
+		const auto matched = CtorName.match(text);
+		const auto meta = matched.hasMatch()
+			? FindConstructor(matched.captured(1))
+			: nullptr;
+		auto items = std::vector<CompletionPopup::Item>();
+		if (!inCtorValue && meta) {
+			for (const auto &field : meta->fields) {
+				const auto &name = field.name;
+				if (name.compare(word, Qt::CaseInsensitive) != 0
+					&& name.startsWith(word, Qt::CaseInsensitive)) {
+					items.push_back({ name, true });
+				}
+			}
+		}
+		if (items.empty()) {
+			for (const auto &constructor : Constructors()) {
+				if (!constructor.name.compare(word, Qt::CaseInsensitive)) {
+					continue;
+				}
+				if (constructor.name.startsWith(word, Qt::CaseInsensitive)) {
+					items.push_back({ constructor.name, false });
+					if (items.size() >= 50) {
+						break;
+					}
+				}
+			}
+		}
+		if (items.empty()) {
+			_popup->hide();
+			return;
+		}
+		const auto caret = edit->cursorRect();
+		const auto topLeft = edit->viewport()->mapToGlobal(caret.topLeft());
+		_popup->showAt(
+			QRect(mapFromGlobal(topLeft), QSize(1, caret.height())),
+			std::move(items));
+	}
+
+	// Code-editor key behavior for the request field: Tab indents or
+	// moves out of a pair, Enter auto-indents (and expands {} pairs),
+	// brackets and quotes auto-close, type over, and pair-delete.
+	[[nodiscard]] bool handleEditorKey(QKeyEvent *e) {
+		const auto edit = _request->rawTextEdit();
+		auto cursor = edit->textCursor();
+		const auto text = edit->toPlainText();
+		const auto pos = cursor.position();
+		const auto before = (pos > 0) ? text[pos - 1] : QChar();
+		const auto after = (pos < text.size()) ? text[pos] : QChar();
+		const auto isPair = before == u'{' ? after == u'}'
+			: before == u'[' ? after == u']'
+			: before == u'"' && after == u'"';
+		const auto modifiers = e->modifiers() & ~Qt::ShiftModifier;
+		switch (e->key()) {
+		case Qt::Key_Tab: {
+			if (modifiers != 0) {
+				return false;
+			}
+			cursor.insertText(u"  "_q);
+			edit->setTextCursor(cursor);
+			return true;
+		}
+		case Qt::Key_Backspace: {
+			if (modifiers != 0 || cursor.hasSelection() || !isPair) {
+				return false;
+			}
+			cursor.setPosition(pos - 1, QTextCursor::MoveAnchor);
+			cursor.setPosition(pos + 1, QTextCursor::KeepAnchor);
+			cursor.removeSelectedText();
+			edit->setTextCursor(cursor);
+			return true;
+		}
+		case Qt::Key_Enter:
+		case Qt::Key_Return: {
+			if (modifiers & (Qt::ControlModifier | Qt::MetaModifier)) {
+				invoke();
+				return true;
+			}
+			const auto line = cursor.block().text();
+			auto indent = 0;
+			while (indent < line.size() && line[indent] == u' ') {
+				++indent;
+			}
+			const auto expands = (before == u'{' && after == u'}')
+				|| (before == u'[' && after == u']');
+			if (!expands) {
+				cursor.insertText(u"\n"_q + line.left(indent));
+				edit->setTextCursor(cursor);
+				return true;
+			}
+			cursor.insertText(
+				u"\n"_q + line.left(indent)
+					+ u"  \n"_q + line.left(indent));
+			cursor.setPosition(pos + 1 + indent + 2);
+			edit->setTextCursor(cursor);
+			return true;
+		}
+		default:
+			break;
+		}
+		const auto ch = e->text();
+		if (modifiers != 0 || ch.size() != 1) {
+			return false;
+		}
+		const auto c = ch.front();
+		const auto opener = (c == u'"' || c == u'{' || c == u'[');
+		const auto closer = (c == u'}' || c == u']');
+		if (opener) {
+			const auto pairWith = (c == u'"') ? u'"' : (c == u'{') ? u'}' : u']';
+			if (cursor.hasSelection()) {
+				const auto selected = cursor.selectedText();
+				cursor.insertText(c + selected + pairWith);
+				cursor.movePosition(QTextCursor::PreviousCharacter);
+				edit->setTextCursor(cursor);
+				return true;
+			} else if (c == u'"' && after == u'"') {
+				cursor.movePosition(QTextCursor::NextCharacter);
+				edit->setTextCursor(cursor);
+				return true;
+			}
+			cursor.insertText(QString(c) + pairWith);
+			cursor.movePosition(QTextCursor::PreviousCharacter);
+			edit->setTextCursor(cursor);
+			return true;
+		} else if (closer && isPair) {
+			cursor.movePosition(QTextCursor::NextCharacter);
+			edit->setTextCursor(cursor);
+			return true;
+		}
+		return false;
+	}
+
+	void acceptCompletion(CompletionPopup::Item item) {
+		const auto edit = _request->rawTextEdit();
+		const auto text = edit->toPlainText();
+		const auto position = edit->textCursor().position();
+		const auto [start, end] = WordBounds(text, position);
+		if (!item.field) {
+			// Accepting a constructor expands the whole document to a
+			// full request template when the user is typing the top-level
+			// "_" value, or is just typing the bare method name without
+			// any "_" key in the document yet.
+			static const auto CtorName = QRegularExpression(
+				u"\"_\"\\s*:\\s*\"([A-Za-z0-9_.]*)"_q);
+			const auto matched = CtorName.match(text);
+			const auto inTopLevelValue = matched.hasMatch()
+				&& position >= matched.capturedStart(1)
+				&& position <= matched.capturedEnd(1);
+			if (const auto meta = FindConstructor(item.text)) {
+				if (inTopLevelValue || !matched.hasMatch()) {
+					_request->setText(
+						JsonText(TemplateConstructor(item.text, 0)));
+					auto cursor = edit->textCursor();
+					cursor.movePosition(QTextCursor::End);
+					edit->setTextCursor(cursor);
+					return;
+				}
+			}
+		}
+		auto insert = item.text;
+		if (item.field) {
+			const auto insideString
+				= (text.left(start).count(u'"') % 2) == 1;
+			const auto quoteNext = (end < text.size() && text[end] == u'"');
+			if (insideString && !quoteNext) {
+				insert += u"\": "_q;
+			}
+		}
+		auto cursor = edit->textCursor();
+		cursor.setPosition(start, QTextCursor::MoveAnchor);
+		cursor.setPosition(end, QTextCursor::KeepAnchor);
+		cursor.insertText(insert);
+		edit->setTextCursor(cursor);
+	}
+
 	void invoke() {
 		auto error = QJsonParseError();
 		const auto document = QJsonDocument::fromJson(
@@ -619,12 +1218,15 @@ private:
 		if (IsReadOnlyMethod(name)) {
 			send(primes, name);
 		} else {
-			_window->show(Ui::MakeConfirmBox(Ui::ConfirmBoxArgs{
-				.text = u"This RPC may modify Telegram state.\n\n"
-					"Are you sure you want to invoke %1?"_q.arg(name),
-				.confirmed = [=] { send(primes, name); },
-				.confirmText = u"Invoke"_q,
-			}));
+			_panel->showBox(
+				Ui::MakeConfirmBox(Ui::ConfirmBoxArgs{
+					.text = u"This RPC may modify Telegram state.\n\n"
+						"Are you sure you want to invoke %1?"_q.arg(name),
+					.confirmed = crl::guard(this, [=] { send(primes, name); }),
+					.confirmText = u"Invoke"_q,
+				}),
+				Ui::LayerOption::KeepOther,
+				anim::type::normal);
 		}
 	}
 
@@ -642,12 +1244,11 @@ private:
 			MTP::ResponseHandler{
 				crl::guard(this, [=](const MTP::Response &) {
 					showStatus(
-						u"Invoked %1 (request %2, layer %3), see History."_q.arg(
+						u"Invoked %1 (request %2, layer %3)."_q.arg(
 							name,
 							QString::number(requestId),
 							QString::number(MTP::details::kCurrentLayer)),
 						false);
-					_showHistory();
 					return true;
 				}),
 				crl::guard(this, [=](
@@ -665,6 +1266,11 @@ private:
 			dcId,
 			0,
 			0);
+		// Start() has already run inside sendSerialized, so the event is
+		// in the store: select it and watch its response land live.
+		if (const auto id = FindEventId(requestId)) {
+			_openEvent(id);
+		}
 	}
 
 	void showStatus(const QString &text, bool isError) {
@@ -674,7 +1280,9 @@ private:
 	}
 
 	not_null<Window::SessionController*> _window;
-	Fn<void()> _showHistory;
+	not_null<Ui::SeparatePanel*> _panel;
+	Fn<void(uint64)> _openEvent;
+	CompletionPopup *_popup = nullptr;
 	Ui::FlatLabel *_label = nullptr;
 	Ui::FlatLabel *_layer = nullptr;
 	Ui::InputField *_request = nullptr;
@@ -685,66 +1293,175 @@ private:
 
 };
 
-[[nodiscard]] QString StatusText(Status status) {
-	switch (status) {
-	case Status::Succeeded: return u"Success"_q;
-	case Status::Failed: return u"Failed"_q;
-	case Status::Cancelled: return u"Cancelled"_q;
-	default: return u"Pending"_q;
-	}
-}
-
-class RpcDetailsBox final : public Ui::BoxContent {
+// Right column, bottom: details of the selected event, refreshed live.
+class DetailsPane final : public Ui::RpWidget {
 public:
-	RpcDetailsBox(QWidget*, Event event)
-	: _event(std::move(event)) {
+	DetailsPane(QWidget *parent)
+	: Ui::RpWidget(parent) {
+		_title = Ui::CreateChild<Ui::FlatLabel>(
+			this,
+			u"Details"_q,
+			st::rpcInspectorDetailsTitle);
+		_copyRequest = Ui::CreateChild<TextButton>(this, u"Copy Request"_q);
+		_copyResponse = Ui::CreateChild<TextButton>(this, u"Copy Response"_q);
+		_copyError = Ui::CreateChild<TextButton>(this, u"Copy Error"_q);
+		_copyJson = Ui::CreateChild<TextButton>(this, u"Copy JSON"_q);
+		_scroll = Ui::CreateChild<Ui::ScrollArea>(this, st::boxScroll);
+
+		_copyRequest->setClickedCallback([=] {
+			if (auto event = Lookup(_id)) {
+				CopyText(JsonText(DecodeBoxed(event->request)));
+			}
+		});
+		_copyResponse->setClickedCallback([=] {
+			if (auto event = Lookup(_id)) {
+				CopyText(JsonText(DecodeBoxed(event->response)));
+			}
+		});
+		_copyError->setClickedCallback([=] {
+			if (auto event = Lookup(_id)) {
+				CopyText(event->errorType + u" ("_q
+					+ QString::number(event->errorCode) + u")"_q
+					+ (event->errorDescription.isEmpty()
+						? QString()
+						: u": "_q + event->errorDescription));
+			}
+		});
+		_copyJson->setClickedCallback([=] {
+			if (auto event = Lookup(_id)) {
+				CopyText(JsonText(EventJson(*event)));
+			}
+		});
+
+		_title->show();
+		open(std::nullopt);
+	}
+
+	void open(std::optional<uint64> id) {
+		_id = id.value_or(0);
+		if (const auto event = Lookup(_id)) {
+			_title->setText(event->method);
+		} else {
+			_title->setText(u"Details"_q);
+		}
+		refreshButtons();
+		rebuild();
+	}
+
+	[[nodiscard]] bool showing(uint64 id) const {
+		return _id == id;
+	}
+
+	void refresh() {
+		refreshButtons();
+		rebuild();
 	}
 
 protected:
-	void prepare() override {
-		setTitle(_event.method);
-		setDimensions(st::boxWideWidth, st::boxMaxListHeight);
-		_container = setInnerWidget(
-			object_ptr<Ui::VerticalLayout>(this));
-
-		addOverview();
-		addTextSection(
-			u"REQUEST"_q,
-			JsonText(DecodeBoxed(_event.request)));
-		if (_event.status == Status::Succeeded && !_event.response.isEmpty()) {
-			addTextSection(
-				u"RESPONSE"_q,
-				JsonText(DecodeBoxed(_event.response)));
-		} else if (_event.status == Status::Failed) {
-			auto error = QString();
-			if (!_event.errorType.isEmpty()) {
-				error = u"Error: %1 (%2)\n"_q.arg(
-					_event.errorType,
-					QString::number(_event.errorCode));
-			}
-			if (!_event.errorDescription.isEmpty()) {
-				error += u"Description: %1\n"_q.arg(_event.errorDescription);
-			}
-			if (!error.isEmpty()) {
-				addTextSection(u"ERROR"_q, error);
-			}
-		}
-		if (_event.needsLayer) {
-			const auto container = _container.data();
-			container->add(
-				object_ptr<Ui::FlatLabel>(
-					container,
-					u"Wrapped in invokeWithLayer and initConnection"
-					" by the transport layer when the connection"
-					" is not initialized yet."_q,
-					st::defaultFlatLabel),
-				st::boxRowPadding);
-		}
-		addCopyButtons();
+	void resizeEvent(QResizeEvent *e) override {
+		Layout();
 	}
 
 private:
-	void addOverview() {
+	[[nodiscard]] QJsonObject EventJson(const Event &event) const {
+		auto json = QJsonObject();
+		json.insert(u"id"_q, double(event.id));
+		json.insert(u"request_id"_q, double(event.requestId));
+		json.insert(u"method"_q, event.method);
+		json.insert(u"dc"_q, double(MTP::BareDcId(event.dcId)));
+		if (event.msgId) {
+			json.insert(u"msg_id"_q, QString::number(event.msgId));
+			json.insert(u"seq_no"_q, double(event.seqNo));
+		}
+		json.insert(u"duration_ms"_q, double(
+			event.finished ? event.finished - event.started : 0));
+		json.insert(u"request_size"_q, double(event.requestSize));
+		json.insert(u"response_size"_q, double(event.responseSize));
+		json.insert(u"status"_q, StatusText(event.status).toLower());
+		json.insert(u"request"_q, DecodeBoxed(event.request));
+		if (!event.response.isEmpty()) {
+			json.insert(u"response"_q, DecodeBoxed(event.response));
+		}
+		if (event.status == Status::Failed) {
+			auto error = QJsonObject();
+			error.insert(u"code"_q, double(event.errorCode));
+			error.insert(u"type"_q, event.errorType);
+			error.insert(u"description"_q, event.errorDescription);
+			json.insert(u"error", error);
+		}
+		return json;
+	}
+
+	void refreshButtons() {
+		const auto event = Lookup(_id);
+		_copyRequest->setVisible(event.has_value());
+		_copyResponse->setVisible(
+			event && !event->response.isEmpty());
+		_copyError->setVisible(
+			event
+			&& event->status == Status::Failed
+			&& !event->errorType.isEmpty());
+		_copyJson->setVisible(event.has_value());
+	}
+
+	void rebuild() {
+		auto fresh = object_ptr<Ui::VerticalLayout>(_scroll);
+		_content = fresh.data();
+		if (const auto event = Lookup(_id)) {
+			addOverview(_content, *event);
+			addTextSection(
+				_content,
+				u"REQUEST"_q,
+				JsonText(DecodeBoxed(event->request)));
+			if (event->status == Status::Succeeded
+				&& !event->response.isEmpty()) {
+				addTextSection(
+					_content,
+					u"RESPONSE"_q,
+					JsonText(DecodeBoxed(event->response)));
+			} else if (event->status == Status::Failed) {
+				auto error = QString();
+				if (!event->errorType.isEmpty()) {
+					error = u"Error: %1 (%2)\n"_q.arg(
+						event->errorType,
+						QString::number(event->errorCode));
+				}
+				if (!event->errorDescription.isEmpty()) {
+					error += u"Description: %1\n"_q.arg(
+						event->errorDescription);
+				}
+				if (!error.isEmpty()) {
+					addTextSection(_content, u"ERROR"_q, error);
+				}
+			}
+			if (event->needsLayer) {
+				_content->add(
+					object_ptr<Ui::FlatLabel>(
+						_content,
+						u"Wrapped in invokeWithLayer and initConnection"
+						" by the transport layer when the connection"
+						" is not initialized yet."_q,
+						st::defaultFlatLabel),
+					st::rpcInspectorRowPadding);
+			}
+		} else {
+			const auto empty = _content->add(
+				object_ptr<Ui::FlatLabel>(
+					_content,
+					Recording()
+						? u"Select a request on the left to inspect it."_q
+						: u"Recording is off, enable it to capture calls."_q,
+					st::defaultFlatLabel),
+				st::rpcInspectorRowPadding);
+			empty->setTextColorOverride(st::windowSubTextFg->c);
+		}
+		_scroll->setOwnedWidget(std::move(fresh));
+		Layout();
+	}
+
+	void addOverview(
+			not_null<Ui::VerticalLayout*> container,
+			const Event &event) {
 		auto text = TextWithEntities();
 		const auto addRow = [&](
 				const QString &key,
@@ -758,52 +1475,53 @@ private:
 				key.size()));
 			text.text += key + u": "_q + value;
 		};
-		addRow(u"Status"_q, StatusText(_event.status));
-		addRow(u"Started"_q, _event.startedAt
-			? QDateTime::fromMSecsSinceEpoch(_event.startedAt)
+		addRow(u"Status"_q, StatusText(event.status));
+		addRow(u"Started"_q, event.startedAt
+			? QDateTime::fromMSecsSinceEpoch(event.startedAt)
 				.toLocalTime()
 				.toString(u"HH:mm:ss"_q)
 			: u"\u2013"_q);
-		addRow(u"DC"_q, QString::number(MTP::BareDcId(_event.dcId)));
+		addRow(u"DC"_q, QString::number(MTP::BareDcId(event.dcId)));
 		addRow(u"Layer"_q, QString::number(MTP::details::kCurrentLayer));
-		addRow(u"Duration"_q, _event.finished
-			? FormatDuration(_event.finished - _event.started)
+		addRow(u"Duration"_q, event.finished
+			? FormatDuration(event.finished - event.started)
 			: u"pending"_q);
-		if (_event.msgId) {
-			addRow(u"Msg ID"_q, QString::number(_event.msgId));
-			addRow(u"Seq No"_q, QString::number(_event.seqNo));
+		if (event.msgId) {
+			addRow(u"Msg ID"_q, QString::number(event.msgId));
+			addRow(u"Seq No"_q, QString::number(event.seqNo));
 		}
-		addRow(u"Request Size"_q, FormatSize(_event.requestSize));
-		if (_event.responseSize) {
-			addRow(u"Response Size"_q, FormatSize(_event.responseSize));
+		addRow(u"Request Size"_q, FormatSize(event.requestSize));
+		if (event.responseSize) {
+			addRow(u"Response Size"_q, FormatSize(event.responseSize));
 		}
-		if (_event.attempts > 1) {
-			addRow(u"Attempts"_q, QString::number(_event.attempts));
+		if (event.attempts > 1) {
+			addRow(u"Attempts"_q, QString::number(event.attempts));
 		}
-		if (_event.afterRequestId) {
+		if (event.afterRequestId) {
 			addRow(u"After"_q, u"request %1 (invokeAfterMsg)"_q.arg(
-				_event.afterRequestId));
+				event.afterRequestId));
 		}
-		addRow(u"Request ID"_q, QString::number(_event.requestId));
-		addRow(u"Event ID"_q, QString::number(_event.id));
+		addRow(u"Request ID"_q, QString::number(event.requestId));
+		addRow(u"Event ID"_q, QString::number(event.id));
 
-		const auto container = _container.data();
 		container->add(
 			object_ptr<Ui::FlatLabel>(
 				container,
 				rpl::single(std::move(text)),
 				st::rpcInspectorDetailsOverview),
-			st::boxRowPadding);
+			st::rpcInspectorRowPadding);
 	}
 
-	void addTextSection(const QString &title, const QString &text) {
-		const auto container = _container.data();
+	void addTextSection(
+			not_null<Ui::VerticalLayout*> container,
+			const QString &title,
+			const QString &text) {
 		container->add(
 			object_ptr<Ui::FlatLabel>(
 				container,
 				rpl::single(title),
 				st::rpcInspectorDetailsTitle),
-			st::boxRowPadding);
+			st::rpcInspectorRowPadding);
 		const auto clipped = (text.size() > kMaxInlineJson)
 			? text.left(kMaxInlineJson)
 				+ u"\n\n\u2026 (%1 bytes total, use the copy"
@@ -811,158 +1529,241 @@ private:
 			: text;
 		const auto label = container->add(
 			object_ptr<Ui::FlatLabel>(container, st::rpcInspectorDetailsJson),
-			st::boxRowPadding);
+			st::rpcInspectorRowPadding);
 		label->setText(clipped);
 		label->setSelectable(true);
 		Ui::SetupSelectingScroll(label, [=](int pixels) {
-			scrollToY(scrollTop() + pixels);
+			_scroll->scrollToY(_scroll->scrollTop() + pixels);
 		});
 	}
 
-	void addCopyButtons() {
-		addButton(rpl::single(u"Copy Request"_q), [=] {
-			CopyText(JsonText(DecodeBoxed(_event.request)));
-		});
-		if (!_event.response.isEmpty()) {
-			addButton(rpl::single(u"Copy Response"_q), [=] {
-				CopyText(JsonText(DecodeBoxed(_event.response)));
-			});
+	void Layout() {
+		const auto padding = st::rpcInspectorRowPadding;
+		const auto headerHeight = _title->height() + padding.top();
+		auto x = width() - padding.right();
+		const auto place = [&](not_null<TextButton*> button) {
+			if (!button->isHidden()) {
+				x -= button->width();
+				button->moveToLeft(
+					x,
+					padding.top()
+						+ (_title->height() - button->height()) / 2);
+				x -= padding.left();
+			}
+		};
+		place(_copyJson);
+		place(_copyError);
+		place(_copyResponse);
+		place(_copyRequest);
+		_title->setGeometry(
+			padding.left(),
+			padding.top(),
+			std::max(x - padding.left(), 0),
+			_title->height());
+		const auto top = headerHeight + padding.top();
+		_scroll->setGeometry(
+			0,
+			top,
+			width(),
+			std::max(height() - top - padding.bottom(), 0));
+		if (_content) {
+			_content->resizeToWidth(
+				width() - padding.left() - padding.right() - st::boxScroll.width);
+			_scroll->updateBars();
 		}
-		if (_event.status == Status::Failed && !_event.errorType.isEmpty()) {
-			addButton(rpl::single(u"Copy Error"_q), [=] {
-				CopyText(_event.errorType + u" ("_q
-					+ QString::number(_event.errorCode) + u")"_q
-					+ (_event.errorDescription.isEmpty()
-						? QString()
-						: u": "_q + _event.errorDescription));
-			});
-		}
-		addButton(rpl::single(u"Copy JSON"_q), [=] {
-			auto json = QJsonObject();
-			json.insert(u"id"_q, double(_event.id));
-			json.insert(u"request_id"_q, double(_event.requestId));
-			json.insert(u"method"_q, _event.method);
-			json.insert(u"dc"_q, double(MTP::BareDcId(_event.dcId)));
-			if (_event.msgId) {
-				json.insert(u"msg_id"_q, QString::number(_event.msgId));
-				json.insert(u"seq_no"_q, double(_event.seqNo));
-			}
-			json.insert(u"duration_ms"_q, double(
-				_event.finished ? _event.finished - _event.started : 0));
-			json.insert(u"request_size"_q, double(_event.requestSize));
-			json.insert(u"response_size"_q, double(_event.responseSize));
-			json.insert(u"status"_q, StatusText(_event.status).toLower());
-			json.insert(
-				u"request"_q,
-				DecodeBoxed(_event.request));
-			if (!_event.response.isEmpty()) {
-				json.insert(
-					u"response"_q,
-					DecodeBoxed(_event.response));
-			}
-			if (_event.status == Status::Failed) {
-				auto error = QJsonObject();
-				error.insert(u"code"_q, double(_event.errorCode));
-				error.insert(u"type"_q, _event.errorType);
-				error.insert(u"description"_q, _event.errorDescription);
-				json.insert(u"error", error);
-			}
-			CopyText(JsonText(json));
-		});
-		addButton(tr::lng_box_ok(), [=] { closeBox(); });
 	}
 
-	Event _event;
-	QPointer<Ui::VerticalLayout> _container;
+	Ui::FlatLabel *_title = nullptr;
+	TextButton *_copyRequest = nullptr;
+	TextButton *_copyResponse = nullptr;
+	TextButton *_copyError = nullptr;
+	TextButton *_copyJson = nullptr;
+	Ui::ScrollArea *_scroll = nullptr;
+	Ui::VerticalLayout *_content = nullptr;
+	uint64 _id = 0;
 
 };
 
-class RpcInspectorBox final : public Ui::BoxContent {
+// The "RPC" tab page: log on the left, composer over details on the
+// right, both always visible, everything live.
+class RpcPage final : public Ui::RpWidget {
 public:
-	RpcInspectorBox(QWidget*, not_null<Window::SessionController*> window)
-	: _window(window) {
+	RpcPage(
+		QWidget *parent,
+		not_null<Window::SessionController*> window,
+		not_null<Ui::SeparatePanel*> panel)
+	: Ui::RpWidget(parent) {
+		_log = Ui::CreateChild<EventLog>(this);
+		_details = Ui::CreateChild<DetailsPane>(this);
+		_composer = Ui::CreateChild<Composer>(
+			this,
+			window,
+			panel,
+			[=](uint64 id) {
+				_log->select(id);
+				_log->scrollToTop();
+				_details->open(id);
+			});
+
+		_log->selections(
+		) | rpl::on_next([=](uint64 id) {
+			_details->open(id);
+		}, lifetime());
+
+		_log->clears(
+		) | rpl::on_next([=] {
+			_details->open(std::nullopt);
+		}, lifetime());
+
+		Dev::Rpc::Updates(
+		) | rpl::on_next([=](uint64 id) {
+			_log->eventUpdated(id);
+			if (_details->showing(id)) {
+				_details->refresh();
+			}
+		}, lifetime());
+
+		_log->show();
+		_composer->show();
+		_details->show();
 	}
 
 protected:
-	void prepare() override {
-		setTitle(u"RPC Inspector"_q);
+	void resizeEvent(QResizeEvent *e) override {
+		const auto logWidth = std::min(
+			st::rpcInspectorLogWidth,
+			width() / 2);
+		_log->setGeometry(0, 0, logWidth, height());
+		const auto rightWidth = width() - logWidth;
+		_composer->resizeToWidth(rightWidth);
+		_composer->moveToLeft(logWidth, 0);
+		_details->setGeometry(
+			logWidth,
+			_composer->height(),
+			rightWidth,
+			std::max(height() - _composer->height(), 0));
+		update();
+	}
 
-		const auto content = setInnerWidget(
-			object_ptr<Ui::VerticalLayout>(this)).data();
-
-		const auto tabs = content->add(
-			object_ptr<Ui::RpWidget>(content));
-		tabs->resize(st::boxWideWidth, st::defaultTabsSlider.height);
-		tabs->show();
-		_historyTab = Ui::CreateChild<TabButton>(tabs, u"History"_q);
-		_invokeTab = Ui::CreateChild<TabButton>(tabs, u"Invoke"_q);
-		const auto tabLeft = st::rpcInspectorRowPadding.left();
-		_historyTab->moveToLeft(tabLeft, 0);
-		_invokeTab->moveToLeft(tabLeft + _historyTab->width() + tabLeft, 0);
-		_historyTab->show();
-		_invokeTab->show();
-
-		_history = content->add(
-			object_ptr<HistoryPane>(
-				content,
-				[=](uint64 id) { showDetails(id); }));
-		_history->show();
-		_invoke = content->add(
-			object_ptr<InvokePane>(
-				content,
-				_window,
-				[=] { showHistoryTab(content); }));
-		_invoke->hide();
-
-		_historyTab->setClickedCallback([=] {
-			showHistoryTab(content);
-		});
-		_invokeTab->setClickedCallback([=] {
-			if (_invoke->isHidden()) {
-				_invoke->show();
-				_history->hide();
-				_invokeTab->setActive(true);
-				_historyTab->setActive(false);
-				content->resizeToWidth(content->width());
-				setDimensions(st::boxWideWidth, content->height());
-			}
-		});
-
-		std::move(
-			Updates()
-		) | rpl::on_next([=](uint64 id) {
-			_history->eventUpdated(id);
-		}, lifetime());
-
-		_historyTab->setActive(true);
-		_invokeTab->setActive(false);
-		content->resizeToWidth(st::boxWideWidth);
-		setDimensions(st::boxWideWidth, content->height());
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		const auto divider = st::lineWidth;
+		const auto x = std::min(st::rpcInspectorLogWidth, width() / 2);
+		p.fillRect(
+			x,
+			0,
+			divider,
+			height(),
+			st::shadowFg);
+		p.fillRect(
+			x + divider,
+			_composer->height(),
+			width() - x - divider,
+			divider,
+			st::shadowFg);
 	}
 
 private:
-	void showHistoryTab(not_null<Ui::VerticalLayout*> content) {
-		if (_history->isHidden()) {
-			_history->show();
-			_invoke->hide();
-			_historyTab->setActive(true);
-			_invokeTab->setActive(false);
-			content->resizeToWidth(content->width());
-			setDimensions(st::boxWideWidth, content->height());
+	EventLog *_log = nullptr;
+	Composer *_composer = nullptr;
+	DetailsPane *_details = nullptr;
+
+};
+
+// The inner widget of the inspector mini-app: a tab strip over tool
+// pages. New tools slot in with one addPage(title, page) call.
+class InspectorInner final : public Ui::RpWidget {
+public:
+	InspectorInner(
+		QWidget *parent,
+		not_null<Window::SessionController*> window,
+		not_null<Ui::SeparatePanel*> panel)
+	: Ui::RpWidget(parent) {
+		addPage(u"RPC"_q, base::make_unique_q<RpcPage>(
+			this,
+			window,
+			panel));
+		selectPage(0);
+	}
+
+protected:
+	void resizeEvent(QResizeEvent *e) override {
+		LayoutTabs();
+		if (auto page = currentPage()) {
+			page->setGeometry(
+				0,
+				st::defaultTabsSlider.height,
+				width(),
+				std::max(
+					height() - st::defaultTabsSlider.height,
+					0));
 		}
 	}
 
-	void showDetails(uint64 id) {
-		if (const auto event = Lookup(id)) {
-			_window->show(Box<RpcDetailsBox>(*event));
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		p.fillRect(
+			0,
+			st::defaultTabsSlider.height - st::lineWidth,
+			width(),
+			st::lineWidth,
+			st::shadowFg);
+	}
+
+private:
+	void addPage(const QString &title, base::unique_qptr<Ui::RpWidget> page) {
+		const auto raw = page.release();
+		raw->hide();
+		_pages.push_back(raw);
+		const auto tab = Ui::CreateChild<TabButton>(this, title);
+		const auto index = int(_tabs.size());
+		tab->setClickedCallback([=] {
+			selectPage(index);
+		});
+		tab->show();
+		_tabs.push_back(tab);
+		LayoutTabs();
+	}
+
+	void selectPage(int index) {
+		_current = index;
+		for (auto i = 0, count = int(_tabs.size()); i != count; ++i) {
+			_tabs[i]->setActive(i == index);
+			if (auto page = _pages[i]) {
+				if (i == index) {
+					page->show();
+				} else {
+					page->hide();
+				}
+			}
+		}
+		if (auto page = currentPage()) {
+			page->setGeometry(
+				0,
+				st::defaultTabsSlider.height,
+				width(),
+				std::max(height() - st::defaultTabsSlider.height, 0));
 		}
 	}
 
-	not_null<Window::SessionController*> _window;
-	TabButton *_historyTab = nullptr;
-	TabButton *_invokeTab = nullptr;
-	HistoryPane *_history = nullptr;
-	InvokePane *_invoke = nullptr;
+	[[nodiscard]] Ui::RpWidget *currentPage() const {
+		return (_current >= 0 && _current < int(_pages.size()))
+			? _pages[_current]
+			: nullptr;
+	}
+
+	void LayoutTabs() {
+		auto x = st::rpcInspectorRowPadding.left();
+		const auto y = 0;
+		for (const auto tab : _tabs) {
+			tab->setGeometry(x, y, tab->width(), st::defaultTabsSlider.height);
+			x += tab->width();
+		}
+	}
+
+	std::vector<TabButton*> _tabs;
+	std::vector<Ui::RpWidget*> _pages;
+	int _current = 0;
 
 };
 
@@ -970,7 +1771,49 @@ private:
 
 void ShowRpcInspector(not_null<Window::SessionController*> controller) {
 	base::options::lookup<bool>(kOptionRpcInspector).set(true);
-	controller->show(Box<RpcInspectorBox>(controller));
+
+	// One panel per session controller: it stays alive (hidden) after it
+	// is closed, keeping filter and composer text, and dies with the
+	// controller so it never outlives the MTP session it invokes on.
+	const auto panel = controller->lifetime().make_state<
+		base::unique_qptr<Ui::SeparatePanel>>();
+	if (!*panel) {
+		*panel = base::make_unique_q<Ui::SeparatePanel>(
+			Ui::SeparatePanelArgs{});
+		(*panel)->setTitle(rpl::single(u"RPC Inspector"_q));
+		(*panel)->setInnerSize(st::rpcInspectorWindowSize, true);
+		(*panel)->showInner(base::make_unique_q<InspectorInner>(
+			(*panel).get(),
+			controller,
+			(*panel).get()));
+		(*panel)->closeRequests(
+		) | rpl::on_next([=] {
+			(*panel)->hideGetDuration();
+		}, (*panel)->lifetime());
+		Platform::SetWindowAppId(
+			(*panel).get(),
+			u"org.telegram.org.inspector"_q);
+	}
+
+	// Open docked to the main window: centered under it, or above it when
+	// there is no room left on the screen. moveToAnchorGeometry() clamps
+	// the result into the available screen area on show.
+	const auto window = controller->window().widget();
+	const auto screen = window->screen();
+	const auto available = screen ? screen->availableGeometry() : QRect();
+	const auto main = window->geometry();
+	auto target = QRect(
+		QPoint(
+			main.center().x() - (*panel)->width() / 2,
+			main.y() + main.height() + st::rpcInspectorAnchorGap),
+		(*panel)->size());
+	if (target.bottom() > available.bottom()) {
+		target.moveBottom(main.y() - st::rpcInspectorAnchorGap);
+	}
+	target.moveLeft(main.center().x() - target.width() / 2);
+	(*panel)->setAnchorData(target, {});
+
+	(*panel)->showAndActivate();
 }
 
 } // namespace Dev::Rpc
