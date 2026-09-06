@@ -3,6 +3,8 @@
 #
 # For license and copyright information please follow this link:
 # https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+#
+# Includes the devtools RPC Inspector sources on every platform.
 
 cmake_minimum_required(VERSION 3.25...3.31)
 
