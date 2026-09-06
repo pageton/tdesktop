@@ -163,8 +163,8 @@ void Controller::showTonSite(
 	}
 	if (_webview && _webview->widget()) {
 		_webview->navigate(url);
-		activate();
 	}
+	activate();
 	_url = url;
 	_subtitleText = _url.value(
 	) | rpl::filter([=](const QString &url) {
@@ -289,7 +289,11 @@ void Controller::createWindow() {
 	}, _container->lifetime());
 
 	_container->show();
-	window->show();
+	// Not shown here: the webview is a QQuickWidget, and creating one under
+	// an already mapped top-level window forces Qt to destroy and recreate
+	// the window's platform surface, which deadlocks in the Wayland client
+	// plugin of Qt 6.11. The window is shown by activate() after the
+	// webview exists.
 }
 
 void Controller::createWebview(const Webview::StorageId &storageId) {
