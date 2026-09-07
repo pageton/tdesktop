@@ -8,7 +8,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "iv/markdown/iv_markdown_microtex.h"
 #include "base/base_file_utilities.h"
 #include "platform/qt/graphic_qt.h"
+// tex::Stroke in MicroTeX initializes members out of declaration order
+// (MSVC C5038), which the /WX build treats as an error.
+#ifdef Q_OS_WIN
+#pragma warning(push)
+#pragma warning(disable: 5038)
 #include "latex.h"
+#pragma warning(pop)
+#else // Q_OS_WIN
+#include "latex.h"
+#endif // else Q_OS_WIN
 
 #include <QtCore/QSize>
 #include <QtCore/QString>
