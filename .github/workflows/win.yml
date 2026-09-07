@@ -135,6 +135,32 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
+      - name: Free up more disk space.
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Select-Object Used,Free | Out-String
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files\Android',
+            'C:\Program Files\Haskell',
+            'C:\ghc',
+            'C:\msys64',
+            'C:\mingw64',
+            'C:\mingw32',
+            'C:\Strawberry',
+            'C:\cygwin',
+            'C:\cygwin64',
+            'C:\Vagrant',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files\MySQL'
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free | Out-String
+
       - name: ThirdParty cache.
         id: cache-third-party
         uses: actions/cache@v6
