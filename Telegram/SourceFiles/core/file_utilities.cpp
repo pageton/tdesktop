@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/storage_account.h"
 #include "base/platform/base_platform_file_utilities.h"
 #include "platform/platform_file_utilities.h"
+#include "platform/platform_specific.h"
 #include "core/application.h"
 #include "base/unixtime.h"
 #include "ui/delayed_activation.h"
@@ -23,6 +24,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QCoreApplication>
 #include <QtCore/QStandardPaths>
 #include <QtGui/QDesktopServices>
+#include <QtGui/QGuiApplication>
 
 bool filedialogGetSaveFile(
 		QPointer<QWidget> parent,
@@ -392,21 +394,47 @@ bool GetDefault(
 	const auto guard = gsl::finally([] {
 		Core::App().notifyFileDialogShown(false);
 	});
+
+	// Same dialog construction the QFileDialog static helpers do, so the
+	// window can carry its own app id subclass on Linux.
+	const auto info = QFileInfo(startFile);
+	auto dialog = QFileDialog(
+		resolvedParent,
+		caption,
+		info.isDir() ? startFile : info.absolutePath(),
+		filter);
+	if (!info.isDir()) {
+		dialog.selectFile(info.fileName());
+	}
 	if (type == Type::ReadFiles) {
-		files = QFileDialog::getOpenFileNames(resolvedParent, caption, startFile, filter);
-		QString path = files.isEmpty() ? QString() : QFileInfo(files.back()).absoluteDir().absolutePath();
+		dialog.setFileMode(QFileDialog::ExistingFiles);
+	} else if (type == Type::ReadFolder) {
+		dialog.setFileMode(QFileDialog::Directory);
+	} else if (type == Type::WriteFile) {
+		dialog.setAcceptMode(QFileDialog::AcceptSave);
+	} else {
+		dialog.setFileMode(QFileDialog::ExistingFile);
+	}
+	::Platform::SetWindowAppId(
+		&dialog,
+		QGuiApplication::desktopFileName() + u".file"_q);
+
+	if (dialog.exec() != QDialog::Accepted) {
+		files = QStringList();
+		return false;
+	}
+	files = dialog.selectedFiles();
+	if (type == Type::ReadFiles) {
+		const auto path = files.isEmpty()
+			? QString()
+			: QFileInfo(files.back()).absoluteDir().absolutePath();
 		if (!path.isEmpty() && path != cDialogLastPath()) {
 			cSetDialogLastPath(path);
 			Local::writeSettings();
 		}
 		return !files.isEmpty();
-	} else if (type == Type::ReadFolder) {
-		file = QFileDialog::getExistingDirectory(resolvedParent, caption, startFile);
-	} else if (type == Type::WriteFile) {
-		file = QFileDialog::getSaveFileName(resolvedParent, caption, startFile, filter);
-	} else {
-		file = QFileDialog::getOpenFileName(resolvedParent, caption, startFile, filter);
 	}
+	file = files.value(0);
 
 	if (file.isEmpty()) {
 		files = QStringList();
