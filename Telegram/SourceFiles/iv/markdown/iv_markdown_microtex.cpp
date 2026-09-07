@@ -7,15 +7,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "iv/markdown/iv_markdown_microtex.h"
 #include "base/base_file_utilities.h"
-#include "platform/qt/graphic_qt.h"
-// tex::Stroke in MicroTeX initializes members out of declaration order
-// (MSVC C5038), which the /WX build treats as an error.
+// MicroTeX's headers trip two /W4 warnings under MSVC (C5038 Stroke member
+// init order in graphic_basic.h, first included via graphic_qt.h, and C4265
+// non-virtual destructors in graphic_qt.h) that the /WX build escalates.
 #ifdef Q_OS_WIN
 #pragma warning(push)
-#pragma warning(disable: 5038)
+#pragma warning(disable: 5038 4265)
+#include "platform/qt/graphic_qt.h"
 #include "latex.h"
 #pragma warning(pop)
 #else // Q_OS_WIN
+#include "platform/qt/graphic_qt.h"
 #include "latex.h"
 #endif // else Q_OS_WIN
 
