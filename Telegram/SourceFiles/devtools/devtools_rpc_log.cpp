@@ -14,6 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonDocument>
+#include <QtCore/QMutex>
 
 #include <atomic>
 #include <deque>
