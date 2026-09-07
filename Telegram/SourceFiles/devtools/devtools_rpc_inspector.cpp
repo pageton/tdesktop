@@ -43,6 +43,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtCore/QJsonValue>
 #include <QtCore/QRegularExpression>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QScreen>
 #include <QtGui/QTextBlock>
 #include <QtWidgets/QTextEdit>
 
