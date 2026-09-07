@@ -1772,49 +1772,51 @@ private:
 void ShowRpcInspector(not_null<Window::SessionController*> controller) {
 	base::options::lookup<bool>(kOptionRpcInspector).set(true);
 
-	// One panel per session controller: it stays alive (hidden) after it
-	// is closed, keeping filter and composer text, and dies with the
-	// controller so it never outlives the MTP session it invokes on.
-	const auto panel = controller->lifetime().make_state<
-		base::unique_qptr<Ui::SeparatePanel>>();
-	if (!*panel) {
-		*panel = base::make_unique_q<Ui::SeparatePanel>(
-			Ui::SeparatePanelArgs{});
-		(*panel)->setTitle(rpl::single(u"RPC Inspector"_q));
-		(*panel)->setWindowTitle(u"RPC Inspector"_q);
-		(*panel)->setInnerSize(st::rpcInspectorWindowSize, true);
-		(*panel)->showInner(base::make_unique_q<InspectorInner>(
-			(*panel).get(),
+	// One panel per main window: it stays alive (hidden) after it is
+	// closed, keeping filter and composer text, and is destroyed together
+	// with the window so it never outlives the MTP session it invokes on.
+	// Qt-parented instead of rpl::lifetime::make_state, which constructs
+	// a fresh holder on every call.
+	const auto window = controller->window().widget();
+	auto panel = static_cast<Ui::SeparatePanel*>(
+		window->findChild<QObject*>(u"RpcInspectorPanel"_q));
+	if (!panel) {
+		panel = new Ui::SeparatePanel(Ui::SeparatePanelArgs{
+			.parent = window,
+		});
+		panel->setObjectName(u"RpcInspectorPanel"_q);
+		panel->setTitle(rpl::single(u"RPC Inspector"_q));
+		panel->setWindowTitle(u"RPC Inspector"_q);
+		panel->setInnerSize(st::rpcInspectorWindowSize, true);
+		panel->showInner(base::make_unique_q<InspectorInner>(
+			panel,
 			controller,
-			(*panel).get()));
-		(*panel)->closeRequests(
+			panel));
+		panel->closeRequests(
 		) | rpl::on_next([=] {
-			(*panel)->hideGetDuration();
-		}, (*panel)->lifetime());
-		Platform::SetWindowAppId(
-			(*panel).get(),
-			u"org.telegram.org.inspector"_q);
+			panel->hideGetDuration();
+		}, panel->lifetime());
+		Platform::SetWindowAppId(panel, u"org.telegram.org.inspector"_q);
 	}
 
 	// Open docked to the main window: centered under it, or above it when
 	// there is no room left on the screen. moveToAnchorGeometry() clamps
 	// the result into the available screen area on show.
-	const auto window = controller->window().widget();
 	const auto screen = window->screen();
 	const auto available = screen ? screen->availableGeometry() : QRect();
 	const auto main = window->geometry();
 	auto target = QRect(
 		QPoint(
-			main.center().x() - (*panel)->width() / 2,
+			main.center().x() - panel->width() / 2,
 			main.y() + main.height() + st::rpcInspectorAnchorGap),
-		(*panel)->size());
+		panel->size());
 	if (target.bottom() > available.bottom()) {
 		target.moveBottom(main.y() - st::rpcInspectorAnchorGap);
 	}
 	target.moveLeft(main.center().x() - target.width() / 2);
-	(*panel)->setAnchorData(target, {});
+	panel->setAnchorData(target, {});
 
-	(*panel)->showAndActivate();
+	panel->showAndActivate();
 }
 
 } // namespace Dev::Rpc
