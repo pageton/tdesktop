@@ -1166,15 +1166,14 @@ private:
 			const auto inTopLevelValue = matched.hasMatch()
 				&& position >= matched.capturedStart(1)
 				&& position <= matched.capturedEnd(1);
-			if (const auto meta = FindConstructor(item.text)) {
-				if (inTopLevelValue || !matched.hasMatch()) {
-					_request->setText(
-						JsonText(TemplateConstructor(item.text, 0)));
-					auto cursor = edit->textCursor();
-					cursor.movePosition(QTextCursor::End);
-					edit->setTextCursor(cursor);
-					return;
-				}
+			const auto meta = FindConstructor(item.text);
+			if (meta && (inTopLevelValue || !matched.hasMatch())) {
+				_request->setText(
+					JsonText(TemplateConstructor(item.text, 0)));
+				auto cursor = edit->textCursor();
+				cursor.movePosition(QTextCursor::End);
+				edit->setTextCursor(cursor);
+				return;
 			}
 		}
 		auto insert = item.text;
