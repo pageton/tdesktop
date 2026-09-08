@@ -320,6 +320,8 @@ def filterByPlatform(commands):
                     continue
             if 'asserts' in scopes:
                 inscope = inscope and 'qt-asserts' in options
+            if 'dumpsyms' in scopes:
+                inscope = inscope and win and not winarm
             skip = inscope if m.group(1) == '!' else not inscope
         elif not skip and not re.match(r'\s*#', command):
             if m and m.group(2) == 'version':
@@ -1510,13 +1512,11 @@ win:
     SET "PYTHONUTF8=1"
     SET "FolderPostfix="
     SET "ToolsetProp="
-    SET "DumpSymsPlatform=x64"
 win64:
     SET "FolderPostfix=_x64"
 winarm:
     SET "FolderPostfix=_ARM64"
     SET "ToolsetProp=/property:PlatformToolset=v145"
-    SET "DumpSymsPlatform=ARM64"
 win:
 depends:python/Scripts/activate.bat
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
@@ -1526,10 +1526,11 @@ depends:python/Scripts/activate.bat
     ninja -C out/Debug%FolderPostfix% common crash_generation_client exception_handler
 release:
     ninja -C out/Release%FolderPostfix% common crash_generation_client exception_handler
+release_win_dumpsyms:
     cd tools\\windows\\dump_syms
     gyp dump_syms.gyp --format=msvs
     # dump_syms requires ATL; not used by Telegram.
-    if not "%SKIP_DUMPSYMS%"=="1" msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform="%DumpSymsPlatform%" %ToolsetProp%
+    if not "%SKIP_DUMPSYMS%"=="1" msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform="x64" %ToolsetProp%
 win:
     deactivate
 mac:
