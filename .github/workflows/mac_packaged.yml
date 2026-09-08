@@ -58,6 +58,7 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: ""
       CMAKE_PREFIX_PATH: "/opt/homebrew/opt/ffmpeg@6:/opt/homebrew/opt/openal-soft"
       TDE2E: "51743dfd01dff6179e2d8f7095729caa4e2222e9"
+      TLOTTIE: "8ca87fc25a"
       UPLOAD_ARTIFACT: "true"
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
@@ -154,6 +155,40 @@ jobs:
           cmake -Bbuild . -DCMAKE_INSTALL_PREFIX=$LibrariesPath/local/tde2e -DTD_E2E_ONLY=ON
           cmake --build build
           cmake --install build
+
+      - name: Tlottie cache.
+        id: cache-tlottie
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.LibrariesPath }}/local/tlottie
+          key: ${{ runner.OS }}-tlottie-${{ env.TLOTTIE }}-${{ env.CACHE_KEY }}
+      - name: Tlottie.
+        if: steps.cache-tlottie.outputs.cache-hit != 'true'
+        run: |
+          cd $LibrariesPath
+
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          fi
+          source $HOME/.cargo/env
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+          git clone https://github.com/dkaraush/tlottie.git
+          cd tlottie
+          git checkout $TLOTTIE
+
+          buildOneArch() {
+              cargo rustc --lib --release --locked \
+                  --features c-api --crate-type staticlib \
+                  --target $1 \
+                  -- --print native-static-libs
+          }
+          buildOneArch aarch64-apple-darwin
+          buildOneArch x86_64-apple-darwin
+
+          mkdir -p $LibrariesPath/local/tlottie/lib $LibrariesPath/local/tlottie/include/tlottie
+          lipo -create target/aarch64-apple-darwin/release/libtlottie.a target/x86_64-apple-darwin/release/libtlottie.a -output $LibrariesPath/local/tlottie/lib/libtlottie.a
+          cp include/tlottie.h $LibrariesPath/local/tlottie/include/tlottie/tlottie.h
 
       - name: Telegram Desktop build.
         if: env.ONLY_CACHE == 'false'
