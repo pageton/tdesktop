@@ -539,6 +539,7 @@ jobs:
 
           call configure.bat ^
           %TDESKTOP_BUILD_ARCH% ^
+          ${{ matrix.arch == 'arm64' && 'qt6' || '' }} ^
           %TDESKTOP_BUILD_API% ^
           -D CMAKE_CONFIGURATION_TYPES=Release ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
