@@ -92,6 +92,13 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
 
+      # The recursive checkout carries the main .git and every submodule
+      # .git dir, several GB that the build never reads. The checkout
+      # post-cleanup no-ops when .git is absent.
+      - name: Drop git history.
+        shell: bash
+        run: find "$TBUILD/$REPO_NAME" -name .git -prune -exec rm -rf {} +
+
       - name: First set up.
         shell: bash
         run: |
@@ -152,7 +159,16 @@ jobs:
             'C:\cygwin64',
             'C:\Vagrant',
             'C:\Program Files\PostgreSQL',
-            'C:\Program Files\MySQL'
+            'C:\Program Files\MySQL',
+            'C:\Miniconda',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\Mozilla Firefox',
+            'C:\Program Files\Google',
+            'C:\Program Files (x86)\Microsoft\Edge',
+            'C:\selenium',
+            'C:\SeleniumWebDrivers',
+            'C:\Program Files\Azure Cosmos DB Emulator',
+            'C:\Program Files\Microsoft SQL Server'
           )
           foreach ($path in $paths) {
             if (Test-Path $path) {
@@ -320,6 +336,13 @@ jobs:
           submodules: recursive
           path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
 
+      # The recursive checkout carries the main .git and every submodule
+      # .git dir, several GB that the build never reads. The checkout
+      # post-cleanup no-ops when .git is absent.
+      - name: Drop git history.
+        shell: bash
+        run: find "$TBUILD/$REPO_NAME" -name .git -prune -exec rm -rf {} +
+
       - name: First set up.
         shell: bash
         run: |
@@ -427,7 +450,16 @@ jobs:
             'C:\cygwin64',
             'C:\Vagrant',
             'C:\Program Files\PostgreSQL',
-            'C:\Program Files\MySQL'
+            'C:\Program Files\MySQL',
+            'C:\Miniconda',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\Mozilla Firefox',
+            'C:\Program Files\Google',
+            'C:\Program Files (x86)\Microsoft\Edge',
+            'C:\selenium',
+            'C:\SeleniumWebDrivers',
+            'C:\Program Files\Azure Cosmos DB Emulator',
+            'C:\Program Files\Microsoft SQL Server'
           )
           foreach ($path in $paths) {
             if (Test-Path $path) {
