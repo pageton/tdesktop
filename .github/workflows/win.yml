@@ -285,3 +285,221 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: artifact\
           retention-days: 1
+
+  windows-release:
+    name: Windows Release
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || ((github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly') && 'depot-windows-latest-16' || 'windows-latest') }}
+
+    strategy:
+      matrix:
+        arch: [x64_x86, x64, arm64]
+
+    env:
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries${{ matrix.arch == 'x64' && '\win64' || '' }}>>%GITHUB_ENV%
+
+      - name: Get repository name.
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+
+      - name: Clone.
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "$(sha256sum $TBUILD/$REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - name: Install VS 2026 Build Tools.
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'vs_buildtools.exe'
+          Invoke-WebRequest -Uri https://aka.ms/vs/18/stable/vs_buildtools.exe -OutFile $exe
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+            '--quiet','--wait','--norestart','--nocache', `
+            '--add','Microsoft.VisualStudio.Workload.VCTools', `
+            '--add','Microsoft.VisualStudio.Component.VC.Tools.ARM64', `
+            '--add','Microsoft.VisualStudio.Component.VC.ATL.ARM64'
+          Remove-Item $exe -Force -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { exit $p.ExitCode }
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: ${{ matrix.arch }}
+          sdk: ${{ env.SDK }}
+          toolset: ${{ case(matrix.arch == 'arm64', '', '14.44') }}
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Free up more disk space.
+        shell: pwsh
+        run: |
+          Get-PSDrive C | Select-Object Used,Free | Out-String
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files\Android',
+            'C:\Program Files\Haskell',
+            'C:\ghc',
+            'C:\msys64',
+            'C:\mingw64',
+            'C:\mingw32',
+            'C:\Strawberry',
+            'C:\cygwin',
+            'C:\cygwin64',
+            'C:\Vagrant',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files\MySQL'
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
+            }
+          }
+          Get-PSDrive C | Select-Object Used,Free | Out-String
+
+      - name: ThirdParty cache.
+        id: cache-third-party
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-${{ runner.arch }}-third-party-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ runner.arch }}-third-party-
+
+      - name: Libraries cache.
+        id: cache-libs
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ matrix.arch }}-libs-v2-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ matrix.arch }}-libs-v2-
+
+      - name: Qt cache.
+        id: cache-qt
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-${{ matrix.arch }}-qt-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-${{ matrix.arch }}-qt-
+
+      - name: Libraries.
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat skip-release silent
+
+      - name: Read configuration.
+        shell: bash
+        run: |
+          case "${{ matrix.arch }}" in
+            x64_x86) BUILD_ARCH="x86"; BUILD_TARGET="win"; ARCHDIR="x86";;
+            arm64) BUILD_ARCH="arm"; BUILD_TARGET="winarm"; ARCHDIR="arm";;
+            *) BUILD_ARCH="x64"; BUILD_TARGET="win64"; ARCHDIR="x64";;
+          esac
+          echo "TDESKTOP_BUILD_ARCH=$BUILD_ARCH" >> $GITHUB_ENV
+          echo "BUILD_TARGET=$BUILD_TARGET" >> $GITHUB_ENV
+          echo "ARCHDIR=$ARCHDIR" >> $GITHUB_ENV
+
+          VERSION_FULL=$(awk '$1=="AppVersionStr" {print $2}' $TBUILD/$REPO_NAME/Telegram/build/version)
+          echo "VERSION_FULL=$VERSION_FULL" >> $GITHUB_ENV
+
+          API="-D TDESKTOP_API_TEST=ON"
+          if [ -n "$TDESKTOP_API_ID" ] && [ -n "$TDESKTOP_API_HASH" ]; then
+            echo "Use the credentials from the repository environment."
+            API="-D TDESKTOP_API_ID=$TDESKTOP_API_ID -D TDESKTOP_API_HASH=$TDESKTOP_API_HASH"
+          fi
+          echo "TDESKTOP_BUILD_API=$API" >> $GITHUB_ENV
+
+      - name: Free up some disk space.
+        shell: bash
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+
+      - name: Telegram Desktop build.
+        run: |
+          cd %TBUILD%\%REPO_NAME%\Telegram
+
+          call configure.bat ^
+          %TDESKTOP_BUILD_ARCH% ^
+          %TDESKTOP_BUILD_API% ^
+          -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D CMAKE_COMPILE_WARNING_AS_ERROR=ON ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
+
+          cmake --build ..\out --config Release --parallel
+
+      - name: Install Inno Setup.
+        run: choco install innosetup --no-progress -y
+
+      - name: Package portable.
+        run: |
+          set OUT=%TBUILD%\%REPO_NAME%\out\Release
+          set VER=%VERSION_FULL%
+          set PKG=%TBUILD%\%REPO_NAME%\package
+
+          cd %OUT%
+          mkdir %PKG%\Telegram
+          copy /Y Telegram.exe %PKG%\Telegram\ >nul
+          if "%BUILD_TARGET%"=="winarm" goto skiplib
+          set DLLDIR=x64
+          if "%BUILD_TARGET%"=="win" set DLLDIR=x86
+          if not exist "%OUT%\modules\%DLLDIR%\d3d\d3dcompiler_47.dll" (
+            mkdir "%OUT%\modules\%DLLDIR%\d3d"
+            copy /Y "%TBUILD%\%REPO_NAME%\cmake\win_directx_helper\modules\%DLLDIR%\d3d\d3dcompiler_47.dll" "%OUT%\modules\%DLLDIR%\d3d\" >nul
+          )
+          mkdir %PKG%\Telegram\modules\%DLLDIR%\d3d
+          copy /Y "%OUT%\modules\%DLLDIR%\d3d\d3dcompiler_47.dll" "%PKG%\Telegram\modules\%DLLDIR%\d3d\" >nul
+          :skiplib
+          cd %PKG%
+          7z a -mx9 td-portable-win-%ARCHDIR%-%VER%.zip Telegram
+
+      - name: Package installer.
+        run: |
+          set OUT=%TBUILD%\%REPO_NAME%\out\Release
+
+          cd %OUT%
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /dMyAppVersion=%VERSION_FULL% /dMyAppVersionFull=%VERSION_FULL% /dMyOutputBaseFilename=td-setup-win-%ARCHDIR%-%VERSION_FULL% "/dReleasePath=%OUT%" /dMyBuildTarget=%BUILD_TARGET% /dNoSignTool %TBUILD%\%REPO_NAME%\Telegram\build\setup.iss
+          if %errorlevel% neq 0 exit /b 1
+          copy /Y "%OUT%\td-setup-win-%ARCHDIR%-%VERSION_FULL%.exe" "%TBUILD%\%REPO_NAME%\package\" >nul
+
+      - uses: actions/upload-artifact@v7
+        name: Upload artifact.
+        with:
+          name: td-release-win-${{ env.ARCHDIR }}
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}\package\
+          retention-days: 90

@@ -34,7 +34,9 @@ CloseApplications=force
 DisableDirPage=no
 DisableProgramGroupPage=no
 WizardStyle=modern
+#ifndef NoSignTool
 SignTool=sha256
+#endif
 
 #ifndef MyOutputBaseFilename
   #if MyBuildTarget == "winarm"
