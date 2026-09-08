@@ -1437,11 +1437,13 @@ win:
     SET "PYTHONUTF8=1"
     SET "FolderPostfix="
     SET "ToolsetProp="
+    SET "DumpSymsPlatform=x64"
 win64:
     SET "FolderPostfix=_x64"
 winarm:
     SET "FolderPostfix=_ARM64"
     SET "ToolsetProp=/property:PlatformToolset=v145"
+    SET "DumpSymsPlatform=ARM64"
 win:
 depends:python/Scripts/activate.bat
     %THIRDPARTY_DIR%\\python\\Scripts\\activate.bat
@@ -1453,7 +1455,7 @@ release:
     ninja -C out/Release%FolderPostfix% common crash_generation_client exception_handler
     cd tools\\windows\\dump_syms
     gyp dump_syms.gyp --format=msvs
-    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform="x64" %ToolsetProp%
+    msbuild -m dump_syms.vcxproj /property:Configuration=Release /property:Platform="%DumpSymsPlatform%" %ToolsetProp%
 win:
     deactivate
 mac:

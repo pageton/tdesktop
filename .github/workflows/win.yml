@@ -336,6 +336,54 @@ jobs:
           git config --global user.email "you@example.com"
           git config --global user.name "Sample"
 
+      # Visual Studio 2026 ships ATL only for its newest toolset, but these
+      # jobs select the v143 14.44 compatibility toolset. Install the
+      # matching ATL package so a cold dependency cache can build
+      # breakpad's dump_syms instead of relying on a cached binary.
+      - name: Visual Studio ATL component.
+        if: matrix.arch != 'arm64'
+        shell: pwsh
+        run: |
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer'
+          $vswhere = Join-Path $installer 'vswhere.exe'
+          $setup = Join-Path $installer 'setup.exe'
+          if (-not (Test-Path $vswhere) -or -not (Test-Path $setup)) {
+            throw "Visual Studio Installer is incomplete at $installer."
+          }
+
+          $toolsComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.x86.x64'
+          $atlComponent = 'Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL'
+          $path = @(& $vswhere -latest -products '*' -requires $toolsComponent -property installationPath)[0]
+          if (-not $path) {
+            throw "No Visual Studio instance provides $toolsComponent."
+          }
+
+          $toolset = Get-ChildItem (Join-Path $path 'VC\Tools\MSVC') -Directory `
+            | Where-Object { $_.Name -like '14.44.*' } `
+            | Sort-Object Name -Descending `
+            | Select-Object -First 1
+          if (-not $toolset) {
+            throw "The selected Visual Studio instance has no 14.44 toolset."
+          }
+          $header = Join-Path $toolset.FullName 'atlmfc\include\atlbase.h'
+          if (Test-Path $header) {
+            Write-Host "ATL is already installed for $($toolset.Name)."
+            exit 0
+          }
+
+          $process = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            'modify',
+            '--installPath', "`"$path`"",
+            '--add', $atlComponent,
+            '--quiet', '--norestart', '--nocache'
+          )
+          if ($process.ExitCode -notin @(0, 3010)) {
+            throw "Visual Studio Installer exited with $($process.ExitCode)."
+          }
+          if (-not (Test-Path $header)) {
+            throw "$atlComponent completed without installing $header."
+          }
+
       - name: Install VS 2026 Build Tools.
         if: matrix.arch == 'arm64'
         shell: pwsh
