@@ -533,6 +533,16 @@ jobs:
         shell: bash
         run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
 
+      # The release build links release libraries only, the debug Qt
+      # libraries are dead weight that still sits on the runner disk.
+      - name: Drop debug Qt libraries.
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path "$env:LibrariesPath" -Recurse -File -Filter '*d.lib' `
+            -ErrorAction SilentlyContinue | Where-Object {
+              $_.FullName -match '[qQ]t'
+            } | Remove-Item -Force -ErrorAction SilentlyContinue
+
       - name: Telegram Desktop build.
         run: |
           cd %TBUILD%\%REPO_NAME%\Telegram
@@ -543,6 +553,7 @@ jobs:
           ${{ matrix.arch == 'x64_x86' && '-D CMAKE_CXX_FLAGS=/Zm2000' || '' }} ^
           %TDESKTOP_BUILD_API% ^
           -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
 
