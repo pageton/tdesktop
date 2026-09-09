@@ -592,14 +592,15 @@ jobs:
           call configure.bat ^
           %TDESKTOP_BUILD_ARCH% ^
           ${{ matrix.arch == 'arm64' && 'qt6' || '' }} ^
-          ${{ matrix.arch == 'x64_x86' && '-D CMAKE_CXX_FLAGS=/Zm2000' || '' }} ^
           %TDESKTOP_BUILD_API% ^
           -D CMAKE_CONFIGURATION_TYPES=Release ^
           -D CMAKE_MSVC_DEBUG_INFORMATION_FORMAT= ^
           -D DESKTOP_APP_DISABLE_AUTOUPDATE=OFF ^
           -D DESKTOP_APP_DISABLE_CRASH_REPORTS=OFF
 
-          cmake --build ..\out --config Release --parallel
+          set PARALLEL=--parallel
+          if "%BUILD_TARGET%"=="win" set PARALLEL=--parallel 2
+          cmake --build ..\out --config Release %PARALLEL%
 
       - name: Install Inno Setup.
         run: choco install innosetup --no-progress -y
