@@ -175,6 +175,33 @@ jobs:
               Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
             }
           }
+
+          # The build pins one Windows SDK and one MSVC toolset through
+          # msvc-dev-cmd; every other version shipped on the image is dead
+          # weight worth ten-plus GB.
+          $sdk = $env:WindowsSDKVersion.TrimEnd('\')
+          foreach ($sub in 'bin', 'Include', 'Lib') {
+            Get-ChildItem (Join-Path $env:WindowsSdkDir $sub) -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^\d+(\.\d+){3}$' -and $_.Name -ne $sdk } |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $toolsetDir = $env:VCToolsInstallDir.TrimEnd('\')
+          $msvcDir = Split-Path $toolsetDir
+          Get-ChildItem $msvcDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne $env:VCToolsVersion } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          $vcDir = Split-Path (Split-Path $msvcDir)
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $vcDir 'Redist\MSVC')
+
+          foreach ($path in @(
+            "$env:ProgramData\chocolatey\lib",
+            "$env:LOCALAPPDATA\pip\cache",
+            "$env:ProgramData\Docker"
+          )) {
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
+            }
+          }
           Get-PSDrive C | Select-Object Used,Free | Out-String
 
       - name: ThirdParty cache.
@@ -462,6 +489,33 @@ jobs:
             'C:\Program Files\Microsoft SQL Server'
           )
           foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
+            }
+          }
+
+          # The build pins one Windows SDK and one MSVC toolset through
+          # msvc-dev-cmd; every other version shipped on the image is dead
+          # weight worth ten-plus GB.
+          $sdk = $env:WindowsSDKVersion.TrimEnd('\')
+          foreach ($sub in 'bin', 'Include', 'Lib') {
+            Get-ChildItem (Join-Path $env:WindowsSdkDir $sub) -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^\d+(\.\d+){3}$' -and $_.Name -ne $sdk } |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $toolsetDir = $env:VCToolsInstallDir.TrimEnd('\')
+          $msvcDir = Split-Path $toolsetDir
+          Get-ChildItem $msvcDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne $env:VCToolsVersion } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          $vcDir = Split-Path (Split-Path $msvcDir)
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $vcDir 'Redist\MSVC')
+
+          foreach ($path in @(
+            "$env:ProgramData\chocolatey\lib",
+            "$env:LOCALAPPDATA\pip\cache",
+            "$env:ProgramData\Docker"
+          )) {
             if (Test-Path $path) {
               Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
             }
