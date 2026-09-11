@@ -6,6 +6,10 @@ on:
       - '.github/workflows/docker.yml'
       - 'Telegram/build/docker/centos_env/**'
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   docker:
     name: Ubuntu
