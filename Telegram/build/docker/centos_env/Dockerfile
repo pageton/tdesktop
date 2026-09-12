@@ -416,6 +416,12 @@ FROM builder AS rnnoise
 RUN --mount=type=cache,target=/var/cache/ccache <<EOF
 git clone -b v0.2 --depth=1 https://github.com/xiph/rnnoise.git
 cd rnnoise
+model=rnnoise_data-$(cat model_version).tar.gz
+for i in 1 2 3 4 5; do
+	wget --tries=5 --retry-connrefused --waitretry=10 --timeout=30 --continue -O $model https://media.xiph.org/rnnoise/models/$model && break
+	sleep $((i * 10))
+done
+test -f $model
 ./autogen.sh
 ./configure --enable-static --disable-shared
 make -j$(nproc)
