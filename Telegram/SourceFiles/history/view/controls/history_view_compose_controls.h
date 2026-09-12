@@ -115,6 +115,7 @@ class WebpageProcessor;
 class CharactersLimitLabel;
 class ComposeAiButton;
 class ComposeTooltipManager;
+class MathHint;
 using AiTooltipManager = ComposeTooltipManager;
 class StashHintManager;
 } // namespace HistoryView::Controls
@@ -589,6 +590,7 @@ private:
 	ChatHelpers::RichPasteOfferThrottle _richPasteOfferThrottle;
 	std::shared_ptr<QMimeData> _pendingRichPaste;
 	const not_null<Ui::InputField*> _field;
+	std::unique_ptr<Controls::MathHint> _mathHint;
 	std::unique_ptr<Controls::RichDraftPreview> _richDraftPreview;
 	base::unique_qptr<Ui::RpWidget> _fieldDisabled;
 	Ui::IconButton * const _botCommandStart = nullptr;
