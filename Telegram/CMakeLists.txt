@@ -588,6 +588,8 @@ PRIVATE
     chat_helpers/field_autocomplete.h
     chat_helpers/gifs_list_widget.cpp
     chat_helpers/gifs_list_widget.h
+    chat_helpers/math_expression.cpp
+    chat_helpers/math_expression.h
     chat_helpers/message_field.cpp
     chat_helpers/message_field.h
     chat_helpers/rich_paste_toast.cpp
@@ -1078,6 +1080,8 @@ PRIVATE
     history/view/controls/history_view_draft_options.h
     history/view/controls/history_view_forward_panel.cpp
     history/view/controls/history_view_forward_panel.h
+    history/view/controls/history_view_math_hint.cpp
+    history/view/controls/history_view_math_hint.h
     history/view/controls/history_view_bot_menu_hold.cpp
     history/view/controls/history_view_bot_menu_hold.h
     history/view/controls/history_view_rich_draft_preview.cpp
