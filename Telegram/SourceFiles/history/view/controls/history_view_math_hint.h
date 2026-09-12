@@ -10,6 +10,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/basic_types.h"
 #include "base/unique_qptr.h"
 
+#include <rpl/rpl.h>
+
 namespace Ui {
 class InputField;
 class RoundButton;
@@ -21,17 +23,19 @@ class MathHint final {
 public:
 	MathHint(
 		not_null<Ui::InputField*> field,
-		Fn<void(QString)> accept);
+		Fn<void(QString)> accepted);
 
 private:
 	void update();
 	void updateGeometry();
+	void accept();
 
 	const not_null<Ui::InputField*> _field;
 	const Fn<void(QString)> _accept;
 	base::unique_qptr<Ui::RoundButton> _button;
 	QString _expression;
 	QString _result;
+	rpl::lifetime _lifetime;
 
 };
 
