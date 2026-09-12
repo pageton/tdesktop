@@ -83,6 +83,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/controls/history_view_compose_ai_tooltip.h"
 #include "history/view/controls/history_view_compose_media_edit_manager.h"
 #include "history/view/controls/history_view_forward_panel.h"
+#include "history/view/controls/history_view_math_hint.h"
 #include "history/view/controls/history_view_rich_draft_preview.h"
 #include "history/view/controls/history_view_draft_options.h"
 #include "history/view/controls/history_view_suggest_options.h"
@@ -3116,6 +3117,15 @@ void ComposeControls::initField() {
 		updateSendAsFileVisibility();
 		updateExpandButtonVisibility();
 	}, _field->lifetime());
+	_mathHint = std::make_unique<Controls::MathHint>(
+		_field,
+		[=](QString text) {
+			setFieldText(
+				{ text, {} },
+				TextUpdateEvent::SaveDraft,
+				Ui::InputField::HistoryAction::NewEntry);
+			_field->setFocus();
+		});
 	_field->changes(
 	) | rpl::on_next([=] {
 		fieldChanged();

@@ -135,6 +135,7 @@ class PhotoEditSpoilerManager;
 class ComposeAiButton;
 class ComposeTooltipManager;
 class RichDraftPreview;
+class MathHint;
 using AiTooltipManager = ComposeTooltipManager;
 struct VoiceToSend;
 } // namespace HistoryView::Controls
@@ -953,6 +954,7 @@ private:
 	std::shared_ptr<Ui::ChatStyle> _fieldChatStyle;
 	bool _cmdStartShown = false;
 	object_ptr<Ui::InputField> _field;
+	std::unique_ptr<HistoryView::Controls::MathHint> _mathHint;
 	std::unique_ptr<HistoryView::Controls::RichDraftPreview> _richDraftPreview;
 	base::unique_qptr<Ui::RpWidget> _fieldDisabled;
 	std::unique_ptr<Ui::RpWidget> _sendRestriction;

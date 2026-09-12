@@ -118,6 +118,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/controls/history_view_compose_search.h"
 #include "history/view/controls/history_view_forward_panel.h"
 #include "history/view/controls/history_view_draft_options.h"
+#include "history/view/controls/history_view_math_hint.h"
 #include "history/view/controls/history_view_suggest_options.h"
 #include "history/view/controls/history_view_ttl_button.h"
 #include "history/view/controls/history_view_voice_record_bar.h"
@@ -490,6 +491,15 @@ HistoryWidget::HistoryWidget(
 	) | rpl::filter(rpl::mappers::_1) | rpl::on_next([=] {
 		fieldFocused();
 	}, _field->lifetime());
+	_mathHint = std::make_unique<HistoryView::Controls::MathHint>(
+		_field.data(),
+		[=](QString text) {
+			setFieldText(
+				{ text, {} },
+				TextUpdateEvent::SaveDraft,
+				FieldHistoryAction::NewEntry);
+			_field->setFocus();
+		});
 	_field->changes(
 	) | rpl::on_next([=] {
 		fieldChanged();
