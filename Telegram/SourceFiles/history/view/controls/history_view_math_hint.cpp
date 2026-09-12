@@ -7,11 +7,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/controls/history_view_math_hint.h"
 
+#include "base/event_filter.h"
 #include "chat_helpers/math_expression.h"
 #include "ui/qt_object_factory.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/fields/input_field.h"
 #include "styles/style_history_view_math_hint.h"
+
+#include <QtGui/QKeyEvent>
+#include <QtWidgets/QTextEdit>
 
 #include <cmath>
 
@@ -29,20 +33,16 @@ namespace {
 
 MathHint::MathHint(
 	not_null<Ui::InputField*> field,
-	Fn<void(QString)> accept)
+	Fn<void(QString)> accepted)
 : _field(field)
-, _accept(std::move(accept))
+, _accept(std::move(accepted))
 , _button(base::unique_qptr<Ui::RoundButton>(
 	Ui::CreateChild<Ui::RoundButton>(
 		field,
 		rpl::single(QString()),
 		st::historyMathHint))) {
 	_button->hide();
-	_button->setClickedCallback([=] {
-		if (!_result.isEmpty()) {
-			_accept(u"%1=%2"_q.arg(_expression, _result));
-		}
-	});
+	_button->setClickedCallback([=] { accept(); });
 	_button->widthValue(
 	) | rpl::on_next([=] {
 		updateGeometry();
@@ -55,6 +55,19 @@ MathHint::MathHint(
 	) | rpl::on_next([=] {
 		update();
 	}, _button->lifetime());
+	base::install_event_filter(
+		not_null<QObject*>(_field->rawTextEdit().get()),
+		[=](not_null<QEvent*> event) {
+			if (event->type() == QEvent::KeyPress) {
+				const auto key = static_cast<QKeyEvent*>(event.get());
+				if (key->key() == Qt::Key_Tab && !_result.isEmpty()) {
+					accept();
+					return base::EventFilterResult::Cancel;
+				}
+			}
+			return base::EventFilterResult::Continue;
+		},
+		_lifetime);
 }
 
 void MathHint::update() {
@@ -91,6 +104,12 @@ void MathHint::updateGeometry() {
 	_button->moveToLeft(
 		_field->width() - _button->width() - st::historyMathHintSkip,
 		_field->height() - _button->height() - st::historyMathHintSkip);
+}
+
+void MathHint::accept() {
+	if (!_result.isEmpty()) {
+		_accept(u"%1=%2"_q.arg(_expression, _result));
+	}
 }
 
 } // namespace HistoryView::Controls
