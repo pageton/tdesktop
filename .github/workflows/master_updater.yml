@@ -1,9 +1,6 @@
 name: Master branch updater.
 
-on:
-  release:
-    types: released
-
+on: workflow_dispatch
 jobs:
   User-agent:
     runs-on: ubuntu-slim

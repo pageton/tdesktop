@@ -1,11 +1,6 @@
 name: Waiting for answer.
 
-on:
-  issue_comment:
-    types: [created]
-  schedule:
-    - cron: '30 0 * * *'
-
+on: workflow_dispatch
 jobs:
   waiting-for-answer:
     runs-on: ubuntu-slim
