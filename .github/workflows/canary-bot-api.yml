@@ -11,13 +11,7 @@
 
 name: Canary Bot API image.
 
-on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: full 40-hex tdlib/telegram-bot-api commit to build (the project has no tags; take the "Update version to X.Y" commit of a release)
-        required: true
-
+on: workflow_dispatch
 permissions:
   contents: read
   packages: write

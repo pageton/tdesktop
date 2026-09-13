@@ -1,11 +1,6 @@
 name: Changelog
 
-on:
-  push:
-    branches: [dev]
-    paths: [changelog.txt]
-  workflow_dispatch:
-
+on: workflow_dispatch
 permissions:
   contents: read
   pages: write
