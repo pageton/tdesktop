@@ -1,11 +1,6 @@
 name: Needs user action.
 
-on:
-  issue_comment:
-    types: [created]
-  schedule:
-    - cron: '0 2 * * *'
-
+on: workflow_dispatch
 jobs:
   needs-user-action:
     runs-on: ubuntu-slim

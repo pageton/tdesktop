@@ -1,47 +1,6 @@
 name: MacOS Packaged.
 
-on:
-  push:
-    # Pushes to the canary or private-ci branches run their own workflows.
-    branches-ignore:
-      - public-canary
-      - private-canary
-      - 'private-ci/**'
-      - 'private-ci-*'
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'changelog.txt'
-      - 'LEGAL'
-      - 'LICENSE'
-      - '.github/**'
-      - '!.github/workflows/mac_packaged.yml'
-      - 'lib/xdg/**'
-      - 'snap/**'
-      - 'Telegram/build/**'
-      - 'Telegram/Resources/uwp/**'
-      - 'Telegram/Resources/winrc/**'
-      - 'Telegram/SourceFiles/platform/win/**'
-      - 'Telegram/SourceFiles/platform/linux/**'
-      - 'Telegram/configure.bat'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'changelog.txt'
-      - 'LEGAL'
-      - 'LICENSE'
-      - '.github/**'
-      - '!.github/workflows/mac_packaged.yml'
-      - 'lib/xdg/**'
-      - 'snap/**'
-      - 'Telegram/build/**'
-      - 'Telegram/Resources/uwp/**'
-      - 'Telegram/Resources/winrc/**'
-      - 'Telegram/SourceFiles/platform/win/**'
-      - 'Telegram/SourceFiles/platform/linux/**'
-      - 'Telegram/configure.bat'
-
+on: workflow_dispatch
 jobs:
 
   macos:
