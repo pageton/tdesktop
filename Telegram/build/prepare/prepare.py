@@ -63,6 +63,7 @@ optionsList = [
     'skip-release',
     'build-stackwalk',
     'qt-asserts',
+    'release-libs-only',
 ]
 options = []
 runCommand = []
@@ -318,6 +319,10 @@ def filterByPlatform(commands):
                     inscope = False
                 elif len(scopes) == 1:
                     continue
+            if 'relonly' in scopes:
+                inscope = inscope and 'release-libs-only' in options
+            if 'norelonly' in scopes:
+                inscope = inscope and 'release-libs-only' not in options
             if 'asserts' in scopes:
                 inscope = inscope and 'qt-asserts' in options
             if 'dumpsyms' in scopes:
@@ -1618,9 +1623,10 @@ win32_win64:
     cmake -B out ^
         -DTG_ANGLE_SPECIAL_TARGET=%SPECIAL_TARGET% ^
         -DTG_ANGLE_ZLIB_INCLUDE_PATH=%LIBS_DIR%/zlib
-    cmake --build out --config Debug
 release:
     cmake --build out --config Release
+win_norelonly:
+    cmake --build out --config Debug
 """)
 
 qtAngleCmake = os.path.realpath(os.path.join(
@@ -1713,6 +1719,8 @@ win:
     SET ASSERTS=
 release:
     SET CONFIGURATIONS=-debug-and-release
+win_relonly:
+    SET CONFIGURATIONS=-release
 win_asserts:
     SET ASSERTS=-force-asserts
 win:
@@ -1767,8 +1775,10 @@ win:
         -D LCMS2_INCLUDE_DIR="%LCMS2_DIR%\\include" ^
         -D LCMS2_LIBRARIES="%LCMS2_DIR%\\out\\Release\\src\\liblcms2.a"
 
+win_norelonly:
     cmake --build . --config Debug
     cmake --install . --config Debug
+win:
     cmake --build .
     cmake --install .
 """)
@@ -1795,9 +1805,10 @@ win:
         -DTG_OWT_LIBVPX_INCLUDE_PATH=$LIBVPX_PATH \
         -DTG_OWT_OPENH264_INCLUDE_PATH=$OPENH264_PATH \
         -DTG_OWT_FFMPEG_INCLUDE_PATH=$FFMPEG_PATH
-    cmake --build out --config Debug
 release:
     cmake --build out --config Release
+win_norelonly:
+    cmake --build out --config Debug
 mac:
     MOZJPEG_PATH=$USED_PREFIX/include
     OPUS_PATH=$USED_PREFIX/include/opus
