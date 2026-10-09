@@ -1,9 +1,6 @@
 name: Can't reproduce.
 
-on:
-  schedule:
-    - cron: '0 3 * * *'
-
+on: workflow_dispatch
 jobs:
   cant-reproduce:
     runs-on: ubuntu-slim

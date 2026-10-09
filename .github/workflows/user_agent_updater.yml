@@ -1,12 +1,6 @@
 name: User-agent updater.
 
-on:
-  repository_dispatch:
-    types: ["Restart user_agent_updater workflow."]
-  schedule:
-    # At 00:00 on day-of-month 1.
-    - cron: "0 0 1 * *"
-
+on: workflow_dispatch
 jobs:
   User-agent:
     runs-on: ubuntu-latest
