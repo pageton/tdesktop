@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "calls/calls_instance.h"
 #include "core/application.h"
 #include "core/click_handler_types.h"
+#include "core/core_screenshot_protection.h"
 #include "core/file_utilities.h"
 #include "core/mime_type.h"
 #include "core/ui_integration.h"
@@ -154,6 +155,16 @@ using RecognitionCacheMap = base::flat_map<RecognitionId, RecognitionResult>;
 		? std::make_unique<base::flat_map<RecognitionId, RecognitionResult>>()
 		: nullptr;
 	return cache.get();
+}
+
+[[nodiscard]] int LayoutIndependentKey(not_null<QKeyEvent*> e) {
+	if constexpr (Platform::IsWindows()) {
+		const auto native = int(e->nativeVirtualKey());
+		if (native >= Qt::Key_A && native <= Qt::Key_Z) {
+			return native;
+		}
+	}
+	return e->key();
 }
 
 [[nodiscard]] bool InstantViewMediaItemMatches(
@@ -915,10 +926,15 @@ OverlayWidget::OverlayWidget()
 
 	// Toggling between windowed and fullscreen changes the window flags,
 	// and that is a path where Qt recreates the native window, dropping
-	// everything set on the old one. Reapply on every handle change.
-	_window->winIdValue(
-	) | rpl::on_next([=] {
-		Platform::SetWindowScreenshotProtection(_window, _screenshotProtected);
+	// everything set on the old one. Reapply on every handle change,
+	// and after the app-wide protection is applied to all windows.
+	rpl::combine(
+		_window->winIdValue(),
+		Core::App().screenshotProtection().activeValue()
+	) | rpl::on_next([=](WId, bool active) {
+		Platform::SetWindowScreenshotProtection(
+			_window,
+			_screenshotProtected || active);
 	}, lifetime());
 
 	_window->screenValue(
@@ -1841,7 +1857,7 @@ void OverlayWidget::updateControls() {
 		_nameNav = QRect(
 			st::mediaviewTextLeft,
 			height() - st::mediaviewTextTop,
-			qMin(_fromNameLabel.maxWidth(), width() / 3),
+			std::min(_fromNameLabel.maxWidth(), width() / 3),
 			st::mediaviewFont->height);
 		const auto separatorWidth = st::mediaviewFont->width(Ui::kQBullet);
 		_separatorNav = QRect(
@@ -2797,11 +2813,11 @@ void OverlayWidget::resizeContentByScreenSize() {
 		const auto use = _fullScreenVideo ? _zoomToScreen : _zoomToDefault;
 		_zoom = kZoomToScreenLevel;
 		if (use >= 0) {
-			_w = qRound(_width * (use + 1));
-			_h = qRound(_height * (use + 1));
+			_w = int(base::SafeRound(_width * (use + 1)));
+			_h = int(base::SafeRound(_height * (use + 1)));
 		} else {
-			_w = qRound(_width / (-use + 1));
-			_h = qRound(_height / (-use + 1));
+			_w = int(base::SafeRound(_width / (-use + 1)));
+			_h = int(base::SafeRound(_height / (-use + 1)));
 		}
 	} else {
 		_zoom = 0;
@@ -2900,8 +2916,8 @@ void OverlayWidget::zoomIn(std::optional<QPoint> anchor) {
 	auto newZoom = _zoom;
 	const auto full = _fullScreenVideo ? _zoomToScreen : _zoomToDefault;
 	if (newZoom == kZoomToScreenLevel) {
-		if (qCeil(full) <= kMaxZoomLevel) {
-			newZoom = qCeil(full);
+		if (int(std::ceil(full)) <= kMaxZoomLevel) {
+			newZoom = int(std::ceil(full));
 		}
 	} else {
 		if (newZoom < full && (newZoom + 1 > full || (full > kMaxZoomLevel && newZoom == kMaxZoomLevel))) {
@@ -2917,8 +2933,8 @@ void OverlayWidget::zoomOut(std::optional<QPoint> anchor) {
 	auto newZoom = _zoom;
 	const auto full = _fullScreenVideo ? _zoomToScreen : _zoomToDefault;
 	if (newZoom == kZoomToScreenLevel) {
-		if (qFloor(full) >= -kMaxZoomLevel) {
-			newZoom = qFloor(full);
+		if (int(std::floor(full)) >= -kMaxZoomLevel) {
+			newZoom = int(std::floor(full));
 		}
 	} else {
 		if (newZoom > full && (newZoom - 1 < full || (full < -kMaxZoomLevel && newZoom == -kMaxZoomLevel))) {
@@ -2937,8 +2953,10 @@ void OverlayWidget::zoomReset() {
 	auto newZoom = _zoom;
 	const auto full = _fullScreenVideo ? _zoomToScreen : _zoomToDefault;
 	if (_zoom == 0) {
-		if (qFloor(full) == qCeil(full) && qRound(full) >= -kMaxZoomLevel && qRound(full) <= kMaxZoomLevel) {
-			newZoom = qRound(full);
+		if (int(std::floor(full)) == int(std::ceil(full))
+			&& int(base::SafeRound(full)) >= -kMaxZoomLevel
+			&& int(base::SafeRound(full)) <= kMaxZoomLevel) {
+			newZoom = int(base::SafeRound(full));
 		} else {
 			newZoom = kZoomToScreenLevel;
 		}
@@ -2949,11 +2967,11 @@ void OverlayWidget::zoomReset() {
 	_y = _skipTop - (_height / 2);
 	float64 z = (_zoom == kZoomToScreenLevel) ? full : _zoom;
 	if (z >= 0) {
-		_x = qRound(_x * (z + 1));
-		_y = qRound(_y * (z + 1));
+		_x = int(base::SafeRound(_x * (z + 1)));
+		_y = int(base::SafeRound(_y * (z + 1)));
 	} else {
-		_x = qRound(_x / (-z + 1));
-		_y = qRound(_y / (-z + 1));
+		_x = int(base::SafeRound(_x / (-z + 1)));
+		_y = int(base::SafeRound(_y / (-z + 1)));
 	}
 	_x += width() / 2;
 	_y += _availableHeight / 2;
@@ -4907,8 +4925,13 @@ void OverlayWidget::updateThemePreviewGeometry() {
 		auto previewRect = QRect((width() - st::themePreviewSize.width()) / 2, (height() - st::themePreviewSize.height()) / 2, st::themePreviewSize.width(), st::themePreviewSize.height());
 		_themePreviewRect = previewRect.marginsAdded(st::themePreviewMargin);
 		if (_themeApply) {
-			auto right = qMax(width() - _themePreviewRect.x() - _themePreviewRect.width(), 0) + st::themePreviewMargin.right();
-			auto bottom = qMin(height(), _themePreviewRect.y() + _themePreviewRect.height());
+			auto right = std::max(
+				width() - _themePreviewRect.x() - _themePreviewRect.width(),
+				0)
+				+ st::themePreviewMargin.right();
+			auto bottom = std::min(
+				height(),
+				_themePreviewRect.y() + _themePreviewRect.height());
 			_themeApply->moveToRight(right, bottom - st::themePreviewMargin.bottom() + (st::themePreviewMargin.bottom() - _themeApply->height()) / 2);
 			right += _themeApply->width() + st::themePreviewButtonsSkip;
 			_themeCancel->moveToRight(right, _themeApply->y());
@@ -5326,6 +5349,7 @@ void OverlayWidget::initThemePreview() {
 	current.backgroundId = Background()->id();
 	current.backgroundImage = Background()->createCurrentImage();
 	current.backgroundTiled = Background()->tile();
+	current.previewBg = st::themePreviewBg->c;
 
 	const auto &cloudList = _document->session().data().cloudThemes().list();
 	const auto i = ranges::find(
@@ -5599,6 +5623,9 @@ void OverlayWidget::restartAtSeekPosition(crl::time position) {
 		if (_pip) {
 			_pip = nullptr;
 		}
+	}
+	if (_speedBoostActive) {
+		options.speed = _speedBoostSpeed;
 	}
 	_streamed->instance.play(options);
 	if (_streamingStartPaused) {
@@ -6063,7 +6090,10 @@ bool OverlayWidget::contentNeedsScreenshotProtection() const {
 
 void OverlayWidget::refreshScreenshotProtection() {
 	_screenshotProtected = contentNeedsScreenshotProtection();
-	Platform::SetWindowScreenshotProtection(_window, _screenshotProtected);
+	Platform::SetWindowScreenshotProtection(
+		_window,
+		(_screenshotProtected
+			|| Core::App().screenshotProtection().active()));
 }
 
 void OverlayWidget::refreshSystemMediaControls() {
@@ -6992,7 +7022,7 @@ void OverlayWidget::paintSpeedBoostContent(
 	p.setPen(Qt::NoPen);
 	for (auto i = 0; i < 2; ++i) {
 		const auto phase = _speedBoostPhase + i * 0.17;
-		const auto pulse = std::sin(phase * M_PI) / 2. + 1.;
+		const auto pulse = std::sin(phase * M_PI) / 2. + 0.5;
 		const auto alpha = opacity * (0.2 + 0.75 * pulse);
 		p.setBrush(anim::with_alpha(st::mediaviewSaveMsgFg->c, alpha));
 		const auto ax = arrowsX + i * arrowStep;
@@ -7282,7 +7312,7 @@ void OverlayWidget::handleKeyPress(not_null<QKeyEvent*> e) {
 	}
 	_processingKeyPress = true;
 	const auto guard = gsl::finally([&] { _processingKeyPress = false; });
-	const auto key = e->key();
+	const auto key = LayoutIndependentKey(e);
 	const auto modifiers = e->modifiers();
 	const auto ctrl = modifiers.testFlag(Qt::ControlModifier);
 	if (_stories) {
@@ -7467,7 +7497,7 @@ void OverlayWidget::handleWheelEvent(not_null<QWheelEvent*> e) {
 			|| (e->source() == Qt::MouseEventSynthesizedBySystem));
 	const auto anchor = zoomAnchor(e->globalPosition());
 	_verticalWheelDelta += angle.y();
-	while (qAbs(_verticalWheelDelta) >= step) {
+	while (std::abs(_verticalWheelDelta) >= step) {
 		if (_verticalWheelDelta < 0) {
 			_verticalWheelDelta += step;
 			if (e->modifiers().testFlag(Qt::ControlModifier)) {
@@ -7606,15 +7636,15 @@ void OverlayWidget::setZoomLevel(
 	_zoom = newZoom;
 	z = (_zoom == kZoomToScreenLevel) ? full : _zoom;
 	if (z > 0) {
-		_w = qRound(_w * (z + 1));
-		_h = qRound(_h * (z + 1));
-		_x = qRound(nx * (z + 1) + anchorX);
-		_y = qRound(ny * (z + 1) + anchorY);
+		_w = int(base::SafeRound(_w * (z + 1)));
+		_h = int(base::SafeRound(_h * (z + 1)));
+		_x = int(base::SafeRound(nx * (z + 1) + anchorX));
+		_y = int(base::SafeRound(ny * (z + 1) + anchorY));
 	} else {
-		_w = qRound(_w / (-z + 1));
-		_h = qRound(_h / (-z + 1));
-		_x = qRound(nx / (-z + 1) + anchorX);
-		_y = qRound(ny / (-z + 1) + anchorY);
+		_w = int(base::SafeRound(_w / (-z + 1)));
+		_h = int(base::SafeRound(_h / (-z + 1)));
+		_x = int(base::SafeRound(nx / (-z + 1) + anchorX));
+		_y = int(base::SafeRound(ny / (-z + 1) + anchorY));
 	}
 	snapXY();
 	if (_opengl) {
@@ -8704,7 +8734,7 @@ bool OverlayWidget::filterApplicationEvent(
 	const auto type = e->type();
 	if (type == QEvent::ShortcutOverride) {
 		const auto event = static_cast<QKeyEvent*>(e.get());
-		const auto key = event->key();
+		const auto key = LayoutIndependentKey(event);
 		const auto ctrl = event->modifiers().testFlag(Qt::ControlModifier);
 		if (key == Qt::Key_F && ctrl && _streamed) {
 			playbackToggleFullScreen();

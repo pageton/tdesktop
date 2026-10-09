@@ -110,7 +110,7 @@ constexpr auto kRichDraftAutosaveTimeout = crl::time(10 * 1000);
 class ArticleSession;
 
 struct ComposeThreadKey {
-	Main::Session *session = nullptr;
+	uint64 sessionId = 0;
 	PeerId peerId = 0;
 	::Data::DraftKey draftKey = ::Data::DraftKey::None();
 
@@ -128,7 +128,7 @@ struct ComposeThreadEntry {
 		MsgId topicRootId,
 		PeerId monoforumPeerId) {
 	return {
-		.session = session.get(),
+		.sessionId = session->uniqueId(),
 		.peerId = peerId,
 		.draftKey = ::Data::DraftKey::Cloud(topicRootId, monoforumPeerId),
 	};
@@ -150,7 +150,16 @@ struct ComposeThreadEntry {
 
 [[nodiscard]] ComposeThreadEntry &ComposeThreadEntryFor(
 		const ComposeThreadKey &key) {
-	return ComposeThreads()[key];
+	auto &threads = ComposeThreads();
+	if (const auto i = threads.find(key); i != end(threads)) {
+		return i->second;
+	}
+	for (auto i = begin(threads); i != end(threads);) {
+		i = SessionByUniqueId(i->first.sessionId)
+			? (i + 1)
+			: threads.erase(i);
+	}
+	return threads[key];
 }
 
 [[nodiscard]] ComposeThreadEntry *LookupComposeThreadEntry(
@@ -4335,7 +4344,9 @@ void ArticleSession::applyInitialPaste() {
 	if (!data || !_editor) {
 		return;
 	}
-	if (const auto structured = ClipboardDataFromMimeData(data.get())) {
+	if (const auto structured = ClipboardDataFromMimeData(
+			data.get(),
+			_session)) {
 		_editor->pasteStructuredClipboardData(*structured);
 		return;
 	}
@@ -4346,7 +4357,17 @@ void ArticleSession::applyInitialPaste() {
 		imported = BlocksFromMarkdown(data->text(), limits, used);
 	}
 	if (imported && !imported->blocks.empty()) {
-		_editor->insertPreparedBlocks(std::move(imported->blocks));
+		const auto editor = _editor.data();
+		if (imported->localMedia.empty()) {
+			editor->pasteImportedBlocks(std::move(*imported));
+		} else {
+			crl::on_main(editor, [
+				editor,
+				imported = std::move(*imported)
+			]() mutable {
+				editor->pasteImportedBlocks(std::move(imported));
+			});
+		}
 		return;
 	} else if (!data->hasText()) {
 		return;

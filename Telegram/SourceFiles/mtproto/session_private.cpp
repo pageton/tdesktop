@@ -1182,7 +1182,7 @@ void SessionPrivate::onReceivedSome() {
 			).arg(_waitForReceived));
 
 		if (ms > 0 && ms * 2 < _waitForReceived) {
-			_waitForReceived = qMax(ms * 2, kMinReceiveTimeout);
+			_waitForReceived = std::max(ms * 2, kMinReceiveTimeout);
 		}
 		_firstSentAt = -1;
 	}

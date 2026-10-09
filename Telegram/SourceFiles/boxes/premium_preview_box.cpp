@@ -1325,6 +1325,15 @@ void Show(
 	}
 }
 
+void RemoveExpiredPreloads() {
+	auto &list = Preloads();
+	list.erase(
+		ranges::remove_if(list, [](const Preload &preload) {
+			return preload.show.expired();
+		}),
+		end(list));
+}
+
 void Show(std::shared_ptr<ChatHelpers::Show> show, QImage back) {
 	auto &list = Preloads();
 	for (auto i = begin(list); i != end(list);) {
@@ -1478,6 +1487,8 @@ void Show(
 		crl::on_main([=] {
 			if (auto strong = weak.lock()) {
 				Show(std::move(strong), result);
+			} else {
+				RemoveExpiredPreloads();
 			}
 		});
 	});
