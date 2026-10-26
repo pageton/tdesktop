@@ -997,11 +997,11 @@ void SetWindowAppId(not_null<QWidget*> widget, const QString &appId) {
 bool NativeFileDialogsSafe() {
 	using namespace gi::repository;
 
-	const auto source = Gio::SettingsSchemaSource::get_default();
+	auto source = Gio::SettingsSchemaSource::get_default();
 	if (!source) {
 		return false;
 	}
-	if (!source->lookup("org.gtk.Settings.FileChooser", true)) {
+	if (!source.lookup("org.gtk.Settings.FileChooser", true)) {
 		return false;
 	}
 	return true;
