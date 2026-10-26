@@ -423,6 +423,10 @@ bool GetDefault(
 	::Platform::SetWindowAppId(
 		&dialog,
 		QGuiApplication::desktopFileName() + u".file"_q);
+	if (!::Platform::NativeFileDialogsSafe()) {
+		// GTK file choosers abort the process when their schema is missing.
+		dialog.setOption(QFileDialog::DontUseNativeDialog);
+	}
 
 	if (dialog.exec() != QDialog::Accepted) {
 		files = QStringList();

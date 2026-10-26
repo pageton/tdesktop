@@ -65,6 +65,7 @@ void AutostartToggle(bool enabled, Fn<void(bool)> done = nullptr);
 [[nodiscard]] bool AmbientScreenshotProtectionSupported();
 void SetWindowScreenshotProtection(not_null<QWidget*> window, bool enabled);
 void SetWindowAppId(not_null<QWidget*> window, const QString &appId);
+[[nodiscard]] bool NativeFileDialogsSafe();
 void WriteCrashDumpDetails();
 void NewVersionLaunched(int oldVersion);
 [[nodiscard]] QImage DefaultApplicationIcon();

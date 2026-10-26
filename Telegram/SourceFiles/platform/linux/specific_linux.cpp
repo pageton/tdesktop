@@ -26,6 +26,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_controller.h"
 #include "webview/platform/linux/webview_linux_webkitgtk.h"
 
+#include <gio/gio.hpp>
+
 #if defined QT_FEATURE_wayland && QT_CONFIG(wayland) \
 	&& __has_include(<QtWaylandClient/private/qwaylandwindow_p.h>)
 #include <QtWaylandClient/private/qwaylandwindow_p.h>
@@ -990,6 +992,19 @@ QString ApplicationIconName() {
 
 void SetWindowAppId(not_null<QWidget*> widget, const QString &appId) {
 	new WindowAppIdHelper(widget, appId);
+}
+
+bool NativeFileDialogsSafe() {
+	using namespace gi::repository;
+
+	const auto source = Gio::SettingsSchemaSource::get_default();
+	if (!source) {
+		return false;
+	}
+	if (!source->lookup("org.gtk.Settings.FileChooser", true)) {
+		return false;
+	}
+	return true;
 }
 
 QString LocalizedCurrencyName(
