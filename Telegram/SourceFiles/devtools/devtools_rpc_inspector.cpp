@@ -1800,8 +1800,7 @@ void ShowRpcInspector(not_null<Window::SessionController*> controller) {
 	}
 
 	// Open docked to the main window: centered under it, or above it when
-	// there is no room left on the screen. moveToAnchorGeometry() clamps
-	// the result into the available screen area on show.
+	// there is no room left on the screen.
 	const auto screen = window->screen();
 	const auto available = screen ? screen->availableGeometry() : QRect();
 	const auto main = window->geometry();
@@ -1814,7 +1813,7 @@ void ShowRpcInspector(not_null<Window::SessionController*> controller) {
 		target.moveBottom(main.y() - st::rpcInspectorAnchorGap);
 	}
 	target.moveLeft(main.center().x() - target.width() / 2);
-	panel->setAnchorData(target, {});
+	panel->move(target.topLeft());
 
 	panel->showAndActivate();
 }
