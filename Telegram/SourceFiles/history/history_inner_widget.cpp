@@ -32,6 +32,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_cursor_state.h"
 #include "history/view/history_view_reply_button.h"
 #include "history/view/history_view_context_menu.h"
+#include "history/view/history_view_copy_selection.h"
 #include "history/view/history_view_reaction_preview.h"
 #include "history/view/history_view_quick_action.h"
 #include "history/view/history_view_add_poll_option.h"
@@ -396,6 +397,7 @@ HistoryInner::HistoryInner(
 		[=](QRect updated) { update(updated); }))
 , _touchSelectTimer([=] { onTouchSelect(); })
 , _touchScrollTimer([=] { onTouchScrollTimer(); })
+, _touchElastic(scroll, [=](QPoint d, bool) { return _widget->touchScroll(d); })
 , _middleClickAutoscroll(
 	[=](int d) { _scroll->scrollToY(_scroll->scrollTop() + d); },
 	[=](const QCursor &cursor) { setCursor(cursor); },
@@ -781,8 +783,9 @@ void HistoryInner::setupSwipeReplyAndBack() {
 					.messageId = exact->fullId(),
 					.quote = selected.highlight.quote,
 					.quoteOffset = selected.highlight.quoteOffset,
+					.richQuote = selected.highlight.richQuote,
 				});
-				if (!selected.highlight.quote.empty()) {
+				if (selected) {
 					_widget->clearSelected();
 				}
 			};
@@ -1935,14 +1938,22 @@ void HistoryInner::onTouchScrollTimer() {
 		if (consumedHorizontal) {
 			_horizontalScrollLocked = true;
 		}
+		const auto weak = base::make_weak(this);
 		const auto hasScrolled = consumedHorizontal
-			|| (!_horizontalScrollLocked && _widget->touchScroll(delta));
+			|| (!_horizontalScrollLocked && _touchElastic.fling(delta));
+		if (!weak) {
+			return;
+		}
 
 		if (_touchSpeed.isNull() || !hasScrolled) {
 			_touchScrollState = Ui::TouchScrollState::Manual;
 			_touchScroll = false;
 			_horizontalScrollLocked = false;
 			_touchScrollTimer.cancel();
+			_touchElastic.finish();
+			if (!weak) {
+				return;
+			}
 		} else {
 			_touchTime = nowTime;
 		}
@@ -2037,8 +2048,11 @@ void HistoryInner::touchEvent(QTouchEvent *e) {
 		_touchScroll = _touchSelect = false;
 		_horizontalScrollLocked = false;
 		_touchScrollState = Ui::TouchScrollState::Manual;
+		_touchScrollTimer.cancel();
+		touchResetSpeed();
 		_touchMaybeSelecting = false;
 		mouseActionCancel();
+		_touchElastic.finish(true);
 		return;
 	}
 
@@ -2085,6 +2099,7 @@ void HistoryInner::touchEvent(QTouchEvent *e) {
 			_touchSelectTimer.cancel();
 			_touchMaybeSelecting = false;
 			_touchScroll = true;
+			_touchElastic.start(_touchPos - _touchStart);
 			touchUpdateSpeed();
 		}
 		if (_touchScroll) {
@@ -2119,6 +2134,10 @@ void HistoryInner::touchEvent(QTouchEvent *e) {
 			}
 			_touchScroll = false;
 		} else if (_touchScroll) {
+			_touchElastic.release();
+			if (!weak) {
+				return;
+			}
 			if (_touchScrollState == Ui::TouchScrollState::Manual) {
 				_touchScrollState = Ui::TouchScrollState::Auto;
 				_touchPrevPosValid = false;
@@ -2129,6 +2148,7 @@ void HistoryInner::touchEvent(QTouchEvent *e) {
 				_horizontalScrollLocked = false;
 				_touchScroll = false;
 				touchResetSpeed();
+				_touchElastic.finish();
 			} else if (_touchScrollState == Ui::TouchScrollState::Acceleration) {
 				_touchScrollState = Ui::TouchScrollState::Auto;
 				_touchWaitingAcceleration = false;
@@ -2182,8 +2202,9 @@ void HistoryInner::touchScrollUpdated(const QPoint &screenPos) {
 	_touchPos = screenPos;
 	if (consumeScrollAction(_touchPos - _touchPrevPos, Qt::NoScrollPhase)) {
 		_horizontalScrollLocked = true;
-	} else if (!_horizontalScrollLocked) {
-		_widget->touchScroll(_touchPos - _touchPrevPos);
+	} else if (!_horizontalScrollLocked
+		&& !_touchElastic.drag(_touchPos - _touchPrevPos)) {
+		return;
 	}
 	touchUpdateSpeed();
 }
@@ -2363,6 +2384,9 @@ std::unique_ptr<QMimeData> HistoryInner::prepareDrag() {
 			uponSelected = isPressInSelectedText(pressedView, dragState);
 		}
 	}
+	if (uponSelected && hasCopyRestrictionForSelected()) {
+		return nullptr;
+	}
 	auto urls = QList<QUrl>();
 	const auto selectedText = [&] {
 		if (uponSelected) {
@@ -2391,6 +2415,12 @@ std::unique_ptr<QMimeData> HistoryInner::prepareDrag() {
 		}
 		return mimeData;
 	} else if (pressedView) {
+		const auto pressedItem = HistoryView::LookupItemByPoint(
+			pressedView,
+			_dragStartPosition);
+		if (hasCopyRestriction(pressedItem)) {
+			return nullptr;
+		}
 		auto forwardIds = MessageIdsList();
 		const auto tryForwardSelection = uponSelected
 			&& !_controller->adaptive().isOneColumn();
@@ -2770,7 +2800,7 @@ HistoryView::SelectedQuote HistoryInner::selectedQuote(
 	if (!view) {
 		return {};
 	}
-	return view->selectedQuote(_selectedTextSelection);
+	return view->selectedReplyQuote(_selectedTextSelection);
 }
 
 void HistoryInner::contextMenuEvent(QContextMenuEvent *e) {
@@ -3313,8 +3343,9 @@ void HistoryInner::showContextMenu(QContextMenuEvent *e, bool showFromTouch) {
 					.quote = selected.highlight.quote,
 					.quoteOffset = selected.highlight.quoteOffset,
 					.todoItemId = todoListTaskId,
+					.richQuote = selected.highlight.richQuote,
 				});
-				if (!selected.highlight.quote.empty()) {
+				if (selected) {
 					_widget->clearSelected();
 				}
 			}, &st::menuIconReply);
@@ -3979,18 +4010,24 @@ bool HistoryInner::showCopyRestrictionForSelected() {
 		&& showCopyRestriction(_selectedTextItem);
 }
 
-void HistoryInner::copySelectedText() {
+void HistoryInner::copySelectedText(bool withImageText) {
 	if (showCopyRestrictionForSelected()) {
 		return;
 	}
-	const auto text = getSelectedText();
-	if (text.empty()) {
+	auto text = getSelectedTextParts();
+	if (text.empty() && (!withImageText || text.images.empty())) {
 		return;
 	}
-	Iv::SetRichBlocksClipboard(
-		text,
-		getSelectedRichBlocks(),
-		&session());
+	HistoryView::CopySelection({
+		.show = _controller->uiShow(),
+		.session = &session(),
+		.text = std::move(text),
+		.blocks = getSelectedRichBlocks(),
+		.withImageText = withImageText,
+	});
+	if (hasSelectedItems()) {
+		clearSelected();
+	}
 }
 
 void HistoryInner::editCaptionUploadLayer(not_null<HistoryItem*> item) {
@@ -4108,6 +4145,10 @@ void HistoryInner::resizeEvent(QResizeEvent *e) {
 }
 
 TextForMimeData HistoryInner::getSelectedText() const {
+	return getSelectedTextParts().composed();
+}
+
+HistorySelectedTextParts HistoryInner::getSelectedTextParts() const {
 	auto selected = _selected;
 
 	if (_mouseAction == MouseAction::Selecting && _dragSelFrom && _dragSelTo) {
@@ -4116,9 +4157,9 @@ TextForMimeData HistoryInner::getSelectedText() const {
 
 	if (selected.empty()) {
 		if (const auto view = viewByItem(_selectedTextItem)) {
-			return view->selectedText(_selectedTextSelection);
+			return { .texts = { view->selectedText(_selectedTextSelection) } };
 		}
-		return _selectedText;
+		return { .texts = { _selectedText } };
 	}
 
 	const auto richContext = (selected.size() > 1);
@@ -4161,19 +4202,12 @@ TextForMimeData HistoryInner::getSelectedText() const {
 			addItem(item);
 		}
 	}
-	if (!richContext && texts.size() == 1) {
-		const auto &part = texts.front().second;
-		if (part.group) {
-			return HistoryGroupText(not_null<const Data::Group*>{ part.group });
-		}
-		return HistoryItemText(part.item);
-	}
 	auto entries = std::vector<HistorySelectedTextEntry>();
 	entries.reserve(texts.size());
 	for (const auto &entry : texts) {
 		entries.push_back(entry.second);
 	}
-	return HistorySelectedItemsText(entries, richContext);
+	return HistorySelectedItemsTextParts(entries, richContext);
 }
 
 Iv::RichPageBlocksSlice HistoryInner::getSelectedRichBlocks() const {
@@ -4381,6 +4415,9 @@ void HistoryInner::keyPressEvent(QKeyEvent *e) {
 	} else if (e == QKeySequence::Copy
 		&& canCopySelected()) {
 		copySelectedText();
+	} else if (HistoryView::IsCopyWithImageTextShortcut(e, &session())
+		&& canCopySelected()) {
+		copySelectedText(true);
 #ifdef Q_OS_MAC
 	} else if (e->key() == Qt::Key_E
 		&& e->modifiers().testFlag(Qt::ControlModifier)
@@ -5949,6 +5986,10 @@ void HistoryInner::refreshAboutView(bool force) {
 				|| user->isFullLoaded()) {
 				refresh();
 			} else {
+				if (force && _aboutView) {
+					_aboutView = nullptr;
+					updateSize();
+				}
 				session().api().requestFullPeer(user);
 			}
 		}

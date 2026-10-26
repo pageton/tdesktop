@@ -21,6 +21,10 @@ inline bool CheckAppTranslocation() {
 inline void IgnoreApplicationActivationRightNow() {
 }
 
+inline int64 ClipboardChangeCount() {
+	return 0;
+}
+
 inline bool TrayIconSupported() {
 	return true;
 }

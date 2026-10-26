@@ -10,8 +10,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/style/style_core_palette.h"
 #include "ui/color_contrast.h"
 
-#include <QtCore/QtMath>
-
 namespace Ui {
 namespace {
 
@@ -23,8 +21,6 @@ constexpr auto kMinChroma = 0.03;
 constexpr auto kOutgoingChromaScale = 1.15;
 constexpr auto kOutgoingChromaMin = 0.05;
 constexpr auto kOutgoingChromaMax = 0.16;
-constexpr auto kGamutIterations = 30;
-constexpr auto kGamutEpsilon = 1e-4;
 constexpr auto kOliveFrom = 95.;
 constexpr auto kOliveSplit = 110.;
 constexpr auto kOliveTo = 125.;
@@ -33,14 +29,9 @@ constexpr auto kOliveGreen = 140.;
 constexpr auto kOliveLightness = 0.66;
 constexpr auto kOliveRange = 0.18;
 constexpr auto kWhiteTextContrast = 4.5;
+constexpr auto kAlphaStep = 8;
 
 using Getter = const style::color &(style::palette_data::*)() const;
-
-struct Lab {
-	float64 lightness = 0.;
-	float64 a = 0.;
-	float64 b = 0.;
-};
 
 struct Floors {
 	float64 bubbleText = 0.;
@@ -186,98 +177,6 @@ using P = style::palette_data;
 	return result;
 }
 
-[[nodiscard]] float64 ToLinear(int channel) {
-	const auto value = channel / 255.;
-	return (value <= 0.04045)
-		? (value / 12.92)
-		: std::pow((value + 0.055) / 1.055, 2.4);
-}
-
-[[nodiscard]] float64 FromLinear(float64 value) {
-	value = std::clamp(value, 0., 1.);
-	return (value <= 0.0031308)
-		? (12.92 * value)
-		: (1.055 * std::pow(value, 1. / 2.4) - 0.055);
-}
-
-[[nodiscard]] Lab ToLab(const QColor &color) {
-	const auto r = ToLinear(color.red());
-	const auto g = ToLinear(color.green());
-	const auto b = ToLinear(color.blue());
-	const auto l = std::cbrt(
-		0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
-	const auto m = std::cbrt(
-		0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
-	const auto s = std::cbrt(
-		0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-	return {
-		.lightness = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-		.a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-		.b = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
-	};
-}
-
-[[nodiscard]] float64 Chroma(const Lab &lab) {
-	return std::hypot(lab.a, lab.b);
-}
-
-[[nodiscard]] float64 Hue(const Lab &lab) {
-	const auto result = std::fmod(
-		std::atan2(lab.b, lab.a) * 180. / M_PI,
-		360.);
-	return (result < 0.) ? (result + 360.) : result;
-}
-
-[[nodiscard]] std::array<float64, 3> LinearFromLch(
-		float64 lightness,
-		float64 chroma,
-		float64 hue) {
-	const auto radians = hue * M_PI / 180.;
-	const auto a = chroma * std::cos(radians);
-	const auto b = chroma * std::sin(radians);
-	const auto l = lightness + 0.3963377774 * a + 0.2158037573 * b;
-	const auto m = lightness - 0.1055613458 * a - 0.0638541728 * b;
-	const auto s = lightness - 0.0894841775 * a - 1.2914855480 * b;
-	const auto l3 = l * l * l;
-	const auto m3 = m * m * m;
-	const auto s3 = s * s * s;
-	return {
-		4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
-		-1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
-		-0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3,
-	};
-}
-
-[[nodiscard]] bool InGamut(float64 lightness, float64 chroma, float64 hue) {
-	for (const auto value : LinearFromLch(lightness, chroma, hue)) {
-		if (value < -kGamutEpsilon || value > 1. + kGamutEpsilon) {
-			return false;
-		}
-	}
-	return true;
-}
-
-[[nodiscard]] QColor FromLch(float64 lightness, float64 chroma, float64 hue) {
-	if (!InGamut(lightness, chroma, hue)) {
-		auto low = 0.;
-		auto high = chroma;
-		for (auto i = 0; i != kGamutIterations; ++i) {
-			const auto middle = (low + high) / 2.;
-			if (InGamut(lightness, middle, hue)) {
-				low = middle;
-			} else {
-				high = middle;
-			}
-		}
-		chroma = low;
-	}
-	const auto rgb = LinearFromLch(lightness, chroma, hue);
-	const auto channel = [](float64 value) {
-		return int(std::round(FromLinear(value) * 255.));
-	};
-	return QColor(channel(rgb[0]), channel(rgb[1]), channel(rgb[2]));
-}
-
 // WHY: darkened yellows read as olive; amber or green keeps them clean.
 [[nodiscard]] float64 NudgedHue(float64 hue, float64 lightness) {
 	if (hue < kOliveFrom || hue > kOliveTo || lightness >= kOliveLightness) {
@@ -389,7 +288,7 @@ using P = style::palette_data;
 	const auto hue = Hue(lab);
 	const auto up = Luminance(Composite(color, backgrounds.front()))
 		>= Luminance(backgrounds.front());
-	for (const auto direction : { up ? 1 : -1, up ? -1 : 1 }) {
+	const auto scan = [&](int direction) -> std::optional<QColor> {
 		for (auto step = 1; step <= kSteps; ++step) {
 			const auto lightness = lab.lightness + direction * step * kStep;
 			if (lightness < 0. || lightness > 1.) {
@@ -402,10 +301,26 @@ using P = style::palette_data;
 				return now;
 			}
 		}
+		return std::nullopt;
+	};
+	const auto opacify = [&](int direction) -> std::optional<QColor> {
+		const auto edge = Make((direction > 0) ? 1. : 0., chroma, hue, nudge);
+		for (auto alpha = color.alpha(); alpha < 255;) {
+			alpha = std::min(alpha + kAlphaStep, 255);
+			if (const auto now = WithAlpha(edge, alpha); ok(now)) {
+				return now;
+			}
+		}
+		return std::nullopt;
+	};
+	for (const auto direction : { up ? 1 : -1, up ? -1 : 1 }) {
+		if (const auto found = scan(direction)) {
+			return *found;
+		} else if (const auto opaque = opacify(direction)) {
+			return *opaque;
+		}
 	}
-	return (color.alpha() != 255)
-		? EnsureContrast(WithAlpha(color, 255), backgrounds, floor, nudge)
-		: color;
+	return color;
 }
 
 [[nodiscard]] QColor ChooseSelectedBg(

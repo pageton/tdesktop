@@ -11,13 +11,19 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/random.h"
 #include "test/test_agent.h"
+#include "test/test_animation_clock.h"
 #include "test/test_log.h"
+#include "test/test_log_scan_internal.h"
+#include "test/test_post_paint.h"
 #include "test/test_probe.h"
 #include "test/test_runner.h"
 #include "logs.h"
 #include "settings.h"
 
 #include <QtCore/QTemporaryDir>
+
+#include <cmath>
+#include <limits>
 
 namespace Test {
 namespace {
@@ -518,6 +524,491 @@ struct PlainField {
 	return true;
 }
 
+// A number of a carried transport line: its printed name, and whether the
+// product source shows the client computes its value itself. Every slot
+// that is not computed decides like any other plain-line position.
+struct TransportSlot {
+	QString name;
+	bool computed = false;
+};
+
+// A DEBUG_LOG line the scan carries: the basename of its source file,
+// which base::LogWriteDebug appends as " (<file> : <line>)", and its
+// format, copied verbatim with adjacent literals joined. Every placeholder
+// is formatted from one integer, %1..%n in text order, one slot each.
+struct TransportLine {
+	QString file;
+	QString format;
+	std::vector<TransportSlot> slots;
+};
+
+[[nodiscard]] TransportSlot Computed(const QString &name) {
+	return { .name = name, .computed = true };
+}
+
+[[nodiscard]] TransportSlot Deciding(const QString &name) {
+	return { .name = name };
+}
+
+// The MTProto transport's own DEBUG_LOG lines whose numbers a bounded
+// short-secret hit may be exactly, by coincidence, with no "name=" field to
+// declare (the rule of
+// 2026/10/13/keep-the-secrecy-scan-from-counting-a-coincidental-transport-number).
+// Each format is the one in the named function of its file, and a slot is
+// Computed only when that function formats it from a value the client
+// computes or keeps itself: a size or count of what it holds or sends, its
+// own clock, its routing state (a dc id, a connection state), a request id
+// of its own maps, or an id it generated. Routing state may follow server
+// configuration or a migrate error; it is still printed from the client's
+// own members and maps, never straight from received bytes. A number read
+// straight from the server's bytes - an acked or received msg_id, a server
+// time, a server salt - stays Deciding even when the client echoes or
+// stores it, and so does a slot glued to a letter, whose whole positive
+// value is only ever an embedded hit. No slot is formatted from fixture
+// input. A line whose literal text drifts from its format is simply not
+// carried and keeps the withheld site.
+[[nodiscard]] const std::vector<TransportLine> &TransportLines() {
+	const auto privateFile = u"session_private.cpp"_q;
+	const auto sessionFile = u"session.cpp"_q;
+	const auto instanceFile = u"mtp_instance.cpp"_q;
+	static const auto result = std::vector<TransportLine>{
+		// SessionPrivate::clearOldContainers: the container's msg_id the
+		// client assigned in tryToSend (prepareToSend), its crl::now() at
+		// sending, crl::now() and base::unixtime::now().
+		{
+			.file = privateFile,
+			.format = u"MTP Info: Removing old container with resending %1, "
+				"sent: %2, now: %3, current unixtime: %4"_q,
+			.slots = {
+				Computed(u"resending"_q),
+				Computed(u"sent"_q),
+				Computed(u"now"_q),
+				Computed(u"unixtime"_q),
+			},
+		},
+		// SessionPrivate::changeSessionId: a base::RandomValue it draws.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: setting server_session: %1"_q,
+			.slots = { Computed(u"server_session"_q) },
+		},
+		// SessionPrivate::tryToSend: _shiftedDcId, getState() and
+		// _pingIdToSend, a base::RandomValue drawn in tryToSend.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: tryToSend for dc %1."_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: not yet connected in dc %1."_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: not yet with auth key in dc %1."_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: dc %1 not sending, waiting for Connected "
+				"state, state: %2"_q,
+			.slots = { Computed(u"dc"_q), Computed(u"state"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: sending ping, ping_id: %1"_q,
+			.slots = { Computed(u"ping_id"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: sending ping_delay_disconnect, "
+				"ping_id: %1"_q,
+			.slots = { Computed(u"ping_id"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: dc %1 sending only service or bind."_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: dc %1 trying to send after ping, "
+				"state: %2"_q,
+			.slots = { Computed(u"dc"_q), Computed(u"state"_q) },
+		},
+		// SessionPrivate::connectToServer: _shiftedDcId and the size of
+		// its own _testConnections.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: DC %1 options not found, waiting for "
+				"config"_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"Connection Info: Connecting to %1 with %2 test "
+				"connections."_q,
+			.slots = { Computed(u"dc"_q), Computed(u"connections"_q) },
+		},
+		// SessionPrivate::onSentSome: the bytes it sent and the receive
+		// delay it computes from them.
+		{
+			.file = privateFile,
+			.format = u"Checking connect for request with size %1 bytes, "
+				"delay will be %2"_q,
+			.slots = { Computed(u"size"_q), Computed(u"delay"_q) },
+		},
+		// SessionPrivate::sendPingForce: _shiftedDcId.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: send ping force for dcWithShift %1."_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		// SessionPrivate::handleReceived: the server time taken from the
+		// received msg_id decides; base::unixtime::now() and the size of
+		// its own received-messages queue are the client's.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: bad server time from msg_id: %1, my "
+				"time: %2"_q,
+			.slots = { Deciding(u"msg_id"_q), Computed(u"time"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"MTP Info: queueTryToReceive() - need to parse in "
+				"another thread, %1 messages."_q,
+			.slots = { Computed(u"messages"_q) },
+		},
+		// SessionPrivate::requestsAcked (both sites of the first format):
+		// msgId is an id of the acked list the server sent and decides; a
+		// request id comes from the client's own maps (haveSent,
+		// _resendingIds, toSend), and the last is a count of its _ackedIds.
+		{
+			.file = privateFile,
+			.format = u"Message Info: ignoring ACK for msgId %1 because "
+				"request %2 requires a response"_q,
+			.slots = { Deciding(u"msgId"_q), Computed(u"request"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"Message Info: msgId %1 was found in recent resent, "
+				"requestId %2 was not found in prepared to send"_q,
+			.slots = { Deciding(u"msgId"_q), Computed(u"requestId"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"Message Error: for msgId %1 found resent request, "
+				"requestId %2, contains requestId %3"_q,
+			.slots = {
+				Deciding(u"msgId"_q),
+				Computed(u"requestId"_q),
+				Computed(u"contains"_q),
+			},
+		},
+		{
+			.file = privateFile,
+			.format = u"Message Info: acked msgId %1 that was prepared to "
+				"resend, requestId %2"_q,
+			.slots = { Deciding(u"msgId"_q), Computed(u"requestId"_q) },
+		},
+		{
+			.file = privateFile,
+			.format = u"Message Info: removing some old acked sent "
+				"msgIds %1"_q,
+			.slots = { Computed(u"msgIds"_q) },
+		},
+		// SessionPrivate::updateAuthKey: _shiftedDcId.
+		{
+			.file = privateFile,
+			.format = u"AuthKey Info: Connection updating key from "
+				"Session, dc %1"_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		// SessionPrivate::setCurrentKeyId: the key id AuthKey::countKeyId
+		// hashes from the key the client created (applyAuthKey).
+		{
+			.file = privateFile,
+			.format = u"MTP Info: auth key id set to id %1"_q,
+			.slots = { Computed(u"id"_q) },
+		},
+		// SessionPrivate::applyAuthKey: _shiftedDcId.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: auth_key id for dc %1 changed, "
+				"restarting..."_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		// SessionPrivate::tryAcquireKeyCreation: the ids of the keys the
+		// client created; the server salts of the key exchange decide.
+		{
+			.file = privateFile,
+			.format = u"AuthKey Info: unbound key creation succeed, ids: "
+				"(%1, %2) server salts: (%3, %4)"_q,
+			.slots = {
+				Computed(u"temporaryKeyId"_q),
+				Computed(u"persistentKeyId"_q),
+				Deciding(u"temporarySalt"_q),
+				Deciding(u"persistentSalt"_q),
+			},
+		},
+		// SessionPrivate::sendSecureRequest: fullSize + 6, and the two
+		// int32 halves of the msg_id the client assigned (prepareToSend,
+		// or the bind request's own); the low half may be negative.
+		{
+			.file = privateFile,
+			.format = u"MTP Info: sending request, size: %1, num: %2, "
+				"time: %3"_q,
+			.slots = {
+				Computed(u"size"_q),
+				Computed(u"num"_q),
+				Computed(u"time"_q),
+			},
+		},
+		// Session::watchDcKeyChanges, stop, kill and needToResumeAndSend:
+		// _shiftedDcId.
+		{
+			.file = sessionFile,
+			.format = u"AuthKey Info: dcTemporaryKeyChanged in Session %1"_q,
+			.slots = { Computed(u"session"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"AuthKey Info: calling Connection::updateAuthKey in "
+				"Session %1"_q,
+			.slots = { Computed(u"session"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"Session Info: stopping session dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"Session Info: marked session dcWithShift %1 as "
+				"killed"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"Session Info: resuming session dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		// Session::sendAnything: _shiftedDcId and _msSendCall, a crl::now();
+		// _msWait is glued to its "ms".
+		{
+			.file = sessionFile,
+			.format = u"MTP Info: dcWithShift %1 can wait for %2ms from "
+				"current %3"_q,
+			.slots = {
+				Computed(u"dcWithShift"_q),
+				Deciding(u"wait"_q),
+				Computed(u"current"_q),
+			},
+		},
+		{
+			.file = sessionFile,
+			.format = u"MTP Info: dcWithShift %1 stopped send timer, can "
+				"wait for %2ms from current %3"_q,
+			.slots = {
+				Computed(u"dcWithShift"_q),
+				Deciding(u"wait"_q),
+				Computed(u"current"_q),
+			},
+		},
+		// Session::sendPrepared: the delay its caller chose and the request
+		// id Instance::Private::sendRequest assigned.
+		{
+			.file = sessionFile,
+			.format = u"MTP Info: adding request to toSendMap, "
+				"msCanWait %1"_q,
+			.slots = { Computed(u"msCanWait"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"MTP Info: added, requestId %1"_q,
+			.slots = { Computed(u"requestId"_q) },
+		},
+		// Session::releaseGenericKeyCreationOnDone and
+		// notifyDcConnectionInited: _shiftedDcId.
+		{
+			.file = sessionFile,
+			.format = u"AuthKey Info: Persistent key changed while binding "
+				"temporary, dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"AuthKey Info: Session key bound, setting, "
+				"dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		{
+			.file = sessionFile,
+			.format = u"MTP Info: MTProtoDC::connectionWasInited(), "
+				"dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+		// Instance::Private::cancel, checkDelayedRequests and
+		// unregisterRequest: a request id of the client's own maps.
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: Cancel request %1."_q,
+			.slots = { Computed(u"request"_q) },
+		},
+		{
+			.file = instanceFile,
+			.format = u"MTP Error: could not find request %1"_q,
+			.slots = { Computed(u"request"_q) },
+		},
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: unregistering request %1."_q,
+			.slots = { Computed(u"request"_q) },
+		},
+		// Instance::Private::dcPersistentKeyChanged: the Dcenter's id.
+		{
+			.file = instanceFile,
+			.format = u"AuthKey Info: writing auth keys, called by dc %1"_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		// Instance::Private::processCallback: Response::requestId, which
+		// SessionPrivate::handleOneReceived takes from its own maps
+		// (wasSent).
+		{
+			.file = instanceFile,
+			.format = u"RPC Info: found parser for request %1, trying to "
+				"parse response..."_q,
+			.slots = { Computed(u"request"_q) },
+		},
+		{
+			.file = instanceFile,
+			.format = u"RPC Info: parser not found for %1"_q,
+			.slots = { Computed(u"request"_q) },
+		},
+		// Instance::Private::importDone: the dc of its requests-by-dc map
+		// and the waiting request's id.
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: auth import to dc %1 succeeded"_q,
+			.slots = { Computed(u"dc"_q) },
+		},
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: resending request %1 to dc %2 after "
+				"import auth"_q,
+			.slots = { Computed(u"request"_q), Computed(u"dc"_q) },
+		},
+		// Instance::Private::onErrorDefault: the request id and its dc from
+		// the client's maps; both dc slots are glued, and the new dc is
+		// parsed from the server's error type.
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: changing request %1 from dcWithShift%2 to "
+				"dc%3"_q,
+			.slots = {
+				Computed(u"request"_q),
+				Deciding(u"from"_q),
+				Deciding(u"to"_q),
+			},
+		},
+		{
+			.file = instanceFile,
+			.format = u"MTP Info: importing auth to dcWithShift %1"_q,
+			.slots = { Computed(u"dcWithShift"_q) },
+		},
+	};
+	return result;
+}
+
+// A carried line's public head: its format's text before the first
+// placeholder, up to the first character HeadShaped refuses, less trailing
+// " .:-/". It is a constant of the format, so it never holds a scanned
+// value.
+[[nodiscard]] QString TransportHead(const QString &format) {
+	static const auto trailing = u" .:-/"_q;
+	const auto size = int(format.size());
+	auto till = 0;
+	while (till < size
+		&& format[till] != QChar('%')
+		&& HeadShaped(QString(format[till]))) {
+		++till;
+	}
+	while (till > 0 && trailing.contains(format[till - 1])) {
+		--till;
+	}
+	return format.left(till);
+}
+
+// The digits a QString::arg of an integer prints, and nothing that
+// QChar::isDigit adds.
+[[nodiscard]] bool IsAsciiDigit(QChar ch) {
+	return (ch.unicode() >= '0') && (ch.unicode() <= '9');
+}
+
+// Whether text[from, end) is exactly |line|'s message followed by
+// " (<line.file> : <digits>)" and nothing else, each placeholder one
+// integer: an optional "-" and at least one ASCII digit. Answers each
+// integer's span [first, second), the minus included, in slot order, or
+// nothing when the text is not that line or the format is not %1..%n in
+// text order with one slot each. Nothing is normalized: whitespace, case,
+// punctuation, signs and digits must be exactly as the product prints them.
+[[nodiscard]] std::vector<std::pair<int, int>> TransportSpans(
+		const TransportLine &line,
+		const QString &text,
+		int from) {
+	const auto &format = line.format;
+	const auto size = int(text.size());
+	const auto length = int(format.size());
+	auto result = std::vector<std::pair<int, int>>();
+	auto at = from;
+	for (auto i = 0; i < length; ++i) {
+		if (format[i] != QChar('%')) {
+			if (at >= size || text[at] != format[i]) {
+				return {};
+			}
+			++at;
+			continue;
+		}
+		const auto index = int(result.size()) + 1;
+		if (index > 9
+			|| i + 1 >= length
+			|| format[i + 1].unicode() != '0' + index
+			|| (i + 2 < length && IsAsciiDigit(format[i + 2]))) {
+			return {};
+		}
+		++i;
+		const auto start = at;
+		if (at < size && text[at] == QChar('-')) {
+			++at;
+		}
+		const auto digits = at;
+		while (at < size && IsAsciiDigit(text[at])) {
+			++at;
+		}
+		if (at == digits) {
+			return {};
+		}
+		result.emplace_back(start, at);
+	}
+	const auto suffix = u" ("_q + line.file + u" : "_q;
+	if (text.mid(at, suffix.size()) != suffix) {
+		return {};
+	}
+	at += int(suffix.size());
+	const auto digits = at;
+	while (at < size && IsAsciiDigit(text[at])) {
+		++at;
+	}
+	if (at == digits
+		|| at + 1 != size
+		|| text[at] != QChar(')')
+		|| result.size() != line.slots.size()) {
+		return {};
+	}
+	return result;
+}
+
 // The secrets a reading can decide on: phrases of at least two normalized
 // words, non-empty short secrets and tokens of at least kMinTokenLength
 // characters, each once. What was refused is counted into |reading|.
@@ -571,7 +1062,8 @@ struct PlainField {
 }
 
 // A plain-line bounded short-secret hit: its public site, and whether it is
-// exactly the value of a declared computed field.
+// exactly the value of a declared computed field or the whole integer of a
+// computed slot of a carried transport line.
 struct PlainHit {
 	QString site;
 	bool computed = false;
@@ -613,6 +1105,12 @@ private:
 		const LineContext &context,
 		int at,
 		int till) const;
+	[[nodiscard]] PlainHit transportHit(
+		const QString &text,
+		int from,
+		int at,
+		int till,
+		const QString &file) const;
 	[[nodiscard]] bool holds(const QString &text) const;
 
 	QSet<QString> _words;
@@ -634,7 +1132,9 @@ public:
 		const QString &planted,
 		const QString &control,
 		SecrecyClassReading &reading,
-		const QString &file);
+		const QString &file,
+		Internal::LogScanObserver *observer,
+		bool strict);
 
 	void feed(const QString &line);
 
@@ -644,6 +1144,8 @@ private:
 	const QString _control;
 	const QString _file; // public name, printed in plain-line sites
 	SecrecyClassReading &_reading;
+	Internal::LogScanObserver *_observer = nullptr;
+	bool _strict = true;
 	DumpTracker _dump;
 	QString _run;
 
@@ -749,7 +1251,9 @@ void SecrecyMatcher::countWordRuns(
 // (Recv); only Other and Send decide. |dumpOnly| is the escaped form, which
 // only a dump can carry. A plain-line hit is reported at its
 // "<file>|<head>|<field>" site (plainHit), and one that is exactly the
-// value of a declared computed field is reported and does not decide.
+// value of a declared computed field, or the whole integer of a computed
+// slot of a carried transport line (transportHit), is reported and does
+// not decide.
 void SecrecyMatcher::countShort(
 		const QString &text,
 		const QString &needle,
@@ -837,10 +1341,11 @@ void SecrecyMatcher::countToken(
 // head (the text from the message start to the first field's name) and the
 // name of the field whose whole value the hit is, or "-". The whole site is
 // withheld as "<file>|?|?", for every reason alike, when the line has no
-// field, the hit lies in the head, the head is not HeadShaped, or the head
-// (with the printed field name) holds any given secret. Only a hit whose
-// printed head and field equal a declaration is computed, so a declaration
-// never matches a withheld site.
+// field (unless it is a carried transport line: transportHit), the hit lies
+// in the head, the head is not HeadShaped, or the head (with the printed
+// field name) holds any given secret. Only a hit whose printed head and
+// field equal a declaration is computed, so a declaration never matches a
+// withheld site.
 PlainHit SecrecyMatcher::plainHit(
 		const QString &text,
 		const LineContext &context,
@@ -851,7 +1356,7 @@ PlainHit SecrecyMatcher::plainHit(
 	const auto from = MessageFrom(text);
 	const auto fields = PlainFields(text, from);
 	if (fields.empty()) {
-		return withheld;
+		return transportHit(text, from, at, till, file);
 	}
 	const auto headTill = fields.front().nameFrom;
 	if (at < headTill && till > from) {
@@ -883,6 +1388,68 @@ PlainHit SecrecyMatcher::plainHit(
 	};
 }
 
+// The site of a bounded hit over text[at, till) on a plain line with no
+// "name=" field, |from| being where MessageFrom put its message. It stays
+// the withheld "<file>|?|?" unless |file| is exactly a DebugLogs log_ part
+// name, the line opens with exactly a writeDebug entry start (logs.cpp
+// _logsEntryStart, ASCII digits, no "(dc:...) ") that ends at |from|, and
+// the rest is exactly one carried transport line (TransportSpans). Then
+// the same rules as plainHit's hold: a hit in the text before the first
+// number, a head that is not HeadShaped or a printed head and slot name
+// that hold a given secret withhold the site. Otherwise the site is
+// "<file>|<head>|<slot>" when the hit is a slot's whole integer, the minus
+// included, and "<file>|<head>|-" for any other position, and the hit is
+// computed only for the whole integer of a Computed slot. No declaration
+// takes part.
+PlainHit SecrecyMatcher::transportHit(
+		const QString &text,
+		int from,
+		int at,
+		int till,
+		const QString &file) const {
+	static const auto partName = QRegularExpression(
+		u"\\ADebugLogs/log_[0-9]{2}_[0-9]{2}\\.txt\\z"_q);
+	static const auto entryStart = QRegularExpression(
+		u"\\A\\[[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3} [0-9]{2,}-[0-9]{7,}\\] "_q);
+	const auto withheld = PlainHit{ .site = file + QChar('|') + kSiteWithheld };
+	if (!partName.match(file).hasMatch()) {
+		return withheld;
+	}
+	const auto entry = entryStart.match(text);
+	if (!entry.hasMatch() || entry.capturedEnd() != from) {
+		return withheld;
+	}
+	for (const auto &line : TransportLines()) {
+		const auto spans = TransportSpans(line, text, from);
+		if (spans.empty()) {
+			continue;
+		} else if (at < spans.front().first && till > from) {
+			return withheld;
+		}
+		const auto head = TransportHead(line.format);
+		auto slot = (const TransportSlot*)nullptr;
+		for (auto i = 0; i != int(spans.size()); ++i) {
+			if (spans[i].first == at && spans[i].second == till) {
+				slot = &line.slots[i];
+				break;
+			}
+		}
+		const auto shown = slot ? (head + QChar(' ') + slot->name) : head;
+		if (!HeadShaped(head) || holds(shown)) {
+			return withheld;
+		}
+		return {
+			.site = file
+				+ QChar('|')
+				+ head
+				+ QChar('|')
+				+ (slot ? slot->name : kSiteNoField),
+			.computed = slot && slot->computed,
+		};
+	}
+	return withheld;
+}
+
 // Whether printed text would carry secret material: any given short secret
 // or token, case-insensitively (stricter than the case-sensitive match, so
 // no case variant prints), or an adjacent pair of one phrase's words.
@@ -908,29 +1475,38 @@ LineFeed::LineFeed(
 	const QString &planted,
 	const QString &control,
 	SecrecyClassReading &reading,
-	const QString &file)
+	const QString &file,
+	Internal::LogScanObserver *observer,
+	bool strict)
 : _matcher(matcher)
 , _planted(planted)
 , _control(control)
 , _file(file)
-, _reading(reading) {
+, _reading(reading)
+, _observer(observer)
+, _strict(strict) {
 }
 
 void LineFeed::feed(const QString &line) {
 	++_reading.lines;
+	if (_observer && _observer->line) {
+		_observer->line(line, IsEntryHeader(line) || IsMainLogStart(line));
+	}
 	if (IsEntryHeader(line)) {
 		_run.clear();
 	}
 	auto context = _dump.begin(line, _reading);
 	context.file = &_file;
-	_matcher.line(line, context, _run, _reading);
+	if (_strict) {
+		_matcher.line(line, context, _run, _reading);
+		_dump.end(line);
+	}
 	if (!_planted.isEmpty() && line.contains(_planted)) {
 		++_reading.plantedHits;
 	}
 	if (!_control.isEmpty() && line.contains(_control)) {
 		++_reading.controlHits;
 	}
-	_dump.end(line);
 }
 
 [[nodiscard]] QString ChopLineEnd(QString line) {
@@ -947,8 +1523,13 @@ void ScanText(
 		const QString &planted,
 		const QString &control,
 		SecrecyClassReading &reading,
-		const QString &file = QString()) {
-	auto feed = LineFeed(matcher, planted, control, reading, file);
+		const QString &file = QString(),
+		Internal::LogScanObserver *observer = nullptr,
+		bool strict = true) {
+	if (observer && observer->beginSource) {
+		observer->beginSource(reading.cls);
+	}
+	auto feed = LineFeed(matcher, planted, control, reading, file, observer, strict);
 	const auto size = int(text.size());
 	auto from = 0;
 	while (from < size) {
@@ -978,7 +1559,9 @@ FileScan ScanFile(
 		const QString &planted,
 		const QString &control,
 		SecrecyClassReading &reading,
-		const QString &name) {
+		const QString &name,
+		Internal::LogScanObserver *observer = nullptr,
+		bool strict = true) {
 	auto result = FileScan();
 	auto file = QFile(path);
 	if (!file.open(QIODevice::ReadOnly)) {
@@ -996,7 +1579,10 @@ FileScan ScanFile(
 		}
 		file.seek(0);
 	}
-	auto feed = LineFeed(matcher, planted, control, reading, name);
+	if (observer && observer->beginSource) {
+		observer->beginSource(reading.cls);
+	}
+	auto feed = LineFeed(matcher, planted, control, reading, name, observer, strict);
 	auto index = 0;
 	while (!file.atEnd()) {
 		++index;
@@ -1181,7 +1767,9 @@ void ReadSource(
 		const SecrecySource &source,
 		const SecrecyMatcher &matcher,
 		const QString &planted,
-		SecrecyClassReading &reading) {
+		SecrecyClassReading &reading,
+		Internal::LogScanObserver *observer = nullptr,
+		bool strict = true) {
 	if (source.invalidName) {
 		++reading.invalidNames;
 		return;
@@ -1209,7 +1797,9 @@ void ReadSource(
 			planted,
 			source.control,
 			reading,
-			source.name);
+			source.name,
+			observer,
+			strict);
 	} else {
 		const auto scan = ScanFile(
 			source.path,
@@ -1218,7 +1808,9 @@ void ReadSource(
 			planted,
 			source.control,
 			reading,
-			source.name);
+			source.name,
+			observer,
+			strict);
 		if (!scan.opened) {
 			++reading.unreadable;
 			return;
@@ -1428,6 +2020,14 @@ const auto kSelfBannerRule = QString(64, QChar('-'));
 const auto kSelfComputedHead = u"Selftest Info: computed state"_q;
 const auto kSelfComputedField = u"digest"_q;
 const auto kSelfOtherValue = u"OTHER_VALUE_MARKER"_q;
+constexpr auto kSelfTelemetryValue = -4821.75;
+constexpr auto kSelfTelemetryDecimals = 2;
+const auto kSelfTelemetryHead = u"NOTE: Selftest telemetry"_q;
+// The digit runs of kSelfTelemetryValue's ordinary decimal.
+const auto kSelfTelemetrySecrets = std::vector<QString>{
+	u"4821"_q,
+	u"75"_q,
+};
 
 [[nodiscard]] std::vector<QString> SelfPhraseA() {
 	return {
@@ -2553,6 +3153,2091 @@ void SelfPrintsNothing(const std::shared_ptr<SelfState> &state) {
 			.arg(fileLeaks.join(u", "_q)));
 }
 
+// One TelemetryNumber case: the input and the exact text it must print.
+struct TelemetryCase {
+	double value = 0.;
+	int decimals = 0;
+	QString expected;
+};
+
+// One table for the exact-output and the digit-run checks: zeros of both
+// signs, integers up to 2^53 - 1, negatives, fractions with a carry, a
+// negative value that rounds to zero, many places, a negative |decimals|
+// and the non-finite values. No case sits on an exact rounding half.
+[[nodiscard]] std::vector<TelemetryCase> TelemetryCases() {
+	const auto notANumber = std::numeric_limits<double>::quiet_NaN();
+	const auto infinity = std::numeric_limits<double>::infinity();
+	return {
+		{ 0., 0, u"0p"_q },
+		{ -0., 0, u"0p"_q },
+		{ 7., 0, u"7p"_q },
+		{ 2147483647., 0, u"2147483647p"_q },
+		{ 9007199254740991., 0, u"9007199254740991p"_q },
+		{ -1., 0, u"-1p"_q },
+		{ -320., 0, u"-320p"_q },
+		{ 0.5, 1, u"0p5"_q },
+		{ 1.25, 2, u"1p25"_q },
+		{ 16.31, 2, u"16p31"_q },
+		{ 99.996, 2, u"100p00"_q },
+		{ kSelfTelemetryValue, kSelfTelemetryDecimals, u"-4821p75"_q },
+		{ -0.004, 2, u"-0p00"_q },
+		{ -0.25, 3, u"-0p250"_q },
+		{ 123456789.0625, 4, u"123456789p0625"_q },
+		{ 3.0625, 12, u"3p062500000000"_q },
+		{ 1.75, -1, u"2p"_q },
+		{ notANumber, 2, u"nan"_q },
+		{ infinity, 2, u"inf"_q },
+		{ -infinity, 2, u"-inf"_q },
+	};
+}
+
+// The one telemetry row shape, as an overlay's Note prints it: a plain
+// test-log line whose value is the whole "value" field.
+[[nodiscard]] QString TelemetryRow(const QString &value) {
+	return kSelfTelemetryHead + u" value="_q + value;
+}
+
+// The clean tree plus |row| as one more test-log line, with |secrets| as
+// extra synthetic short secrets, so that row is their only candidate.
+[[nodiscard]] SelfFixture RowFixture(
+		const QString &row,
+		const std::vector<QString> &secrets) {
+	auto result = CleanFixture();
+	for (const auto &secret : secrets) {
+		result.secrets.shortSecrets.push_back(secret);
+	}
+	InsertBeforePlanted(result.testLog, QStringList{ row });
+	return result;
+}
+
+// The clean tree plus one telemetry row printing |value|, with the digit
+// runs of the control value as extra synthetic short secrets, so that row
+// is the scan's only candidate.
+[[nodiscard]] SelfFixture TelemetryFixture(const QString &value) {
+	return RowFixture(TelemetryRow(value), kSelfTelemetrySecrets);
+}
+
+// Every distinct non-empty digits-only substring of |text|, in order of
+// first appearance: each is a short secret a formatted number could
+// coincide with, so each must be held only embedded.
+[[nodiscard]] std::vector<QString> DigitRuns(const QString &text) {
+	auto result = std::vector<QString>();
+	auto seen = QSet<QString>();
+	const auto size = int(text.size());
+	for (auto from = 0; from != size; ++from) {
+		for (auto till = from; till != size && text[till].isDigit(); ++till) {
+			const auto run = text.mid(from, till + 1 - from);
+			if (!seen.contains(run)) {
+				seen.insert(run);
+				result.push_back(run);
+			}
+		}
+	}
+	return result;
+}
+
+// One row through the scan's own matcher, alone: no canary, planted
+// control or other line, whose framing would leave some digit secrets
+// undecided in a whole ReadSecrecy.
+[[nodiscard]] SecrecyClassReading ScanRow(
+		const QString &row,
+		std::vector<QString> secrets) {
+	const auto matcher = SecrecyMatcher({
+		.shortSecrets = std::move(secrets),
+	});
+	auto result = SecrecyClassReading();
+	ScanText(row, matcher, {}, {}, result, u"test_log.txt"_q);
+	return result;
+}
+
+// Overlay telemetry: the digit runs of an ordinary decimal, as synthetic
+// short secrets, decide at the row's plain-line site with field "-", and
+// the same value as a TelemetryNumber holds them only embedded. Keeps no
+// reading, so the earlier stages' rows and readings stay as they were.
+void SelfTelemetry() {
+	using Sites = std::map<QString, int>;
+	const auto ordinary = QString::number(
+		kSelfTelemetryValue,
+		'f',
+		kSelfTelemetryDecimals);
+	const auto telemetry = TelemetryNumber(
+		kSelfTelemetryValue,
+		kSelfTelemetryDecimals);
+	const auto site = u"test_log.txt|"_q
+		+ kSelfTelemetryHead
+		+ u"|"_q
+		+ kSiteNoField;
+	const auto secrets = int(kSelfTelemetrySecrets.size());
+	{
+		const auto what = u"secrecy self-test: the digit runs of an "
+			"ordinary decimal telemetry value, as synthetic short secrets, "
+			"fail the scan at the row's plain-line site with field -"_q;
+		const auto run = RunFixture(TelemetryFixture(ordinary));
+		CheckPrepared(what, run);
+		const auto &r = run.reading;
+		const auto &t = ClassOf(r, SecrecyClass::TestLog);
+		const auto rows = SecrecyRows(r).join(QChar('\n'));
+		Check(
+			run.prepared
+				&& r.decided
+				&& !r.clean
+				&& (r.clientWritten() == secrets)
+				&& (r.computed() == 0)
+				&& (t.bounded == secrets)
+				&& (t.boundedOther == secrets)
+				&& (t.embedded == 0)
+				&& (t.plainSites == Sites{ { site, secrets } })
+				&& rows.contains(u"plainSites=["_q
+					+ site
+					+ u" x"_q
+					+ QString::number(secrets)
+					+ u"]"_q),
+			what,
+			SiteDetails(t) + u" | "_q + Summary(r));
+	}
+	{
+		const auto what = u"secrecy self-test: the same value as a "
+			"TelemetryNumber holds those secrets only embedded, so a scan "
+			"whose only candidate is that row is clean"_q;
+		const auto run = RunFixture(TelemetryFixture(telemetry));
+		CheckPrepared(what, run);
+		const auto &r = run.reading;
+		const auto &t = ClassOf(r, SecrecyClass::TestLog);
+		Check(
+			run.prepared
+				&& r.decided
+				&& r.clean
+				&& (r.clientWritten() == 0)
+				&& (r.computed() == 0)
+				&& (t.bounded == 0)
+				&& (t.embedded == secrets)
+				&& t.plainSites.empty(),
+			what,
+			SiteDetails(t) + u" | "_q + Summary(r));
+	}
+	const auto cases = TelemetryCases();
+	const auto count = int(cases.size());
+	{
+		// The outputs print in case order: the evidence parses them back.
+		auto outputs = QStringList();
+		auto failed = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto &entry = cases[i];
+			const auto out = TelemetryNumber(entry.value, entry.decimals);
+			outputs.push_back(out);
+			if (out != entry.expected) {
+				failed.push_back(QString::number(i));
+			}
+		}
+		Check(
+			failed.isEmpty(),
+			u"secrecy self-test: TelemetryNumber prints every case as "
+			"documented"_q,
+			u"cases=%1 outputs=[%2] failed=[%3]"_q
+				.arg(count)
+				.arg(outputs.join(u", "_q))
+				.arg(failed.join(u", "_q)));
+	}
+	{
+		// The rule side reads every digit run of each output; the control
+		// side proves the same row shape does count a run of an ordinary
+		// decimal, so a zero on the rule side is not the row's doing.
+		auto finite = 0;
+		auto digitRuns = 0;
+		auto ruleBounded = 0;
+		auto ruleEmbedded = 0;
+		auto ordinaryWithBoundedRun = 0;
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto &entry = cases[i];
+			const auto out = TelemetryNumber(entry.value, entry.decimals);
+			const auto runs = DigitRuns(out);
+			const auto rule = ScanRow(TelemetryRow(out), runs);
+			digitRuns += int(runs.size());
+			ruleBounded += rule.bounded;
+			ruleEmbedded += rule.embedded;
+			auto ok = (rule.bounded == 0)
+				&& (rule.embedded >= int(runs.size()));
+			if (std::isfinite(entry.value)) {
+				++finite;
+				const auto text = QString::number(
+					entry.value,
+					'f',
+					std::max(entry.decimals, 0));
+				const auto plain = ScanRow(
+					TelemetryRow(text),
+					DigitRuns(text));
+				if (plain.bounded >= 1) {
+					++ordinaryWithBoundedRun;
+				} else {
+					ok = false;
+				}
+			}
+			if (!ok) {
+				failing.push_back(QString::number(i));
+			}
+		}
+		Check(
+			failing.isEmpty() && (finite > 0) && (digitRuns > 0),
+			u"secrecy self-test: no digit run of any TelemetryNumber is "
+			"bounded, while the ordinary decimal of every finite value holds "
+			"a bounded one"_q,
+			u"cases=%1 finite=%2 digitRuns=%3 ruleBounded=%4 "
+			"ruleEmbedded=%5 ordinaryWithBoundedRun=%6/%2 failing=[%7]"_q
+				.arg(count)
+				.arg(finite)
+				.arg(digitRuns)
+				.arg(ruleBounded)
+				.arg(ruleEmbedded)
+				.arg(ordinaryWithBoundedRun)
+				.arg(failing.join(u", "_q)));
+	}
+}
+
+// Caller text for the converted helper rows, synthetic and letters only,
+// with no phrase word.
+const auto kSelfHelperSlots = std::vector<QString>{
+	u"Selftest helper"_q,
+	u"Selftest subject"_q,
+	u"Selftest control"_q,
+	u"Selftest rows"_q,
+};
+
+// The same slots made of SelfPhraseA() words: each slot holds one pair, and
+// adjacent slots meet at another pair (cactus dolphin, lobster volcano,
+// mango velvet), so any converted number placed directly between two slots
+// would change the word-run count.
+const auto kSelfHelperPhraseSlots = std::vector<QString>{
+	u"walnut giraffe cactus"_q,
+	u"dolphin pumpkin lobster"_q,
+	u"volcano oyster mango"_q,
+	u"velvet kangaroo jaguar"_q,
+};
+
+// Synthetic values of the converted rows. None equals a digit run the
+// clean fixture or the canaries hold bounded in client-written text; the
+// flag 1 is bounded there only in the Recv entry, which never decides.
+const auto kSelfHelperSample = PostPaintSample{
+	.seq = 4821,
+	.paintAt = 37645,
+	.lastPaintAt = 37693,
+	.covered = 59,
+	.lo = 61482,
+	.hi = 61537,
+};
+const auto kSelfHelperStop = PostPaintStop{
+	.reason = u"owner-destroyed"_q,
+	.seq = 4821,
+	.pending = true,
+	.samples = 3764,
+	.paints = 5937,
+	.ignored = 6148,
+	.dropped = 7293,
+};
+const auto kSelfHelperFrame = ClockedFrame{
+	.index = 36,
+	.requested = 4821,
+	.tick = 37645,
+	.reachedLo = 3764,
+	.reachedHi = 4829,
+	.waited = 5937,
+	.probeTicks = 41,
+	.renderTicks = 53,
+};
+
+// The distinct maximal digit runs of |text|, in order of first appearance:
+// the numbers an ordinary row prints, each as a synthetic short secret.
+[[nodiscard]] std::vector<QString> MaximalDigitRuns(const QString &text) {
+	auto result = std::vector<QString>();
+	const auto size = int(text.size());
+	auto from = 0;
+	while (from < size) {
+		if (!text[from].isDigit()) {
+			++from;
+			continue;
+		}
+		auto till = from + 1;
+		while (till < size && text[till].isDigit()) {
+			++till;
+		}
+		const auto run = text.mid(from, till - from);
+		if (!ranges::contains(result, run)) {
+			result.push_back(run);
+		}
+		from = till;
+	}
+	return result;
+}
+
+// |text| without each "p" that directly follows a digit and is not
+// followed by a letter or digit: the point of a TelemetryNumber with no
+// fraction digits, so a requested row reads back as its ordinary text.
+[[nodiscard]] QString StripTelemetryPoints(const QString &text) {
+	auto result = QString();
+	const auto size = int(text.size());
+	for (auto i = 0; i != size; ++i) {
+		const auto point = (text[i] == QChar('p'))
+			&& (i > 0)
+			&& text[i - 1].isDigit()
+			&& ((i + 1 == size) || !text[i + 1].isLetterOrNumber());
+		if (!point) {
+			result += text[i];
+		}
+	}
+	return result;
+}
+
+// The SelfPhraseA() word runs the scan's own matcher counts in |row|.
+[[nodiscard]] int PhraseRuns(const QString &row) {
+	const auto matcher = SecrecyMatcher({ .phrases = { SelfPhraseA() } });
+	auto reading = SecrecyClassReading();
+	ScanText(row, matcher, {}, {}, reading);
+	return reading.wordRunsOther;
+}
+
+// The walk of the tally and refusal rows: |slots| name it, its subject and
+// its control; 4821 items examined, 37 subjects and |controls| controls.
+[[nodiscard]] DiscriminatingScan HelperScan(
+		const std::vector<QString> &slots,
+		int controls) {
+	auto result = DiscriminatingScan(slots[0], slots[1], slots[2]);
+	result.examined(4821);
+	for (auto i = 0; i != 37; ++i) {
+		result.matchedSubject();
+	}
+	for (auto i = 0; i != controls; ++i) {
+		result.matchedControl();
+	}
+	return result;
+}
+
+// The refusal of a request named slots[0] that renders nothing: it has an
+// action, also a handler when |handler|, and asks for |elapsed|.
+[[nodiscard]] QString HelperRequestRefusal(
+		const std::vector<QString> &slots,
+		bool handler,
+		std::vector<crl::time> elapsed,
+		NumberFormat format) {
+	auto request = ClockedRequest{
+		.name = slots[0],
+		.action = [] {},
+		.elapsed = std::move(elapsed),
+		.render = [](const ClockedFrame &) {},
+	};
+	if (handler) {
+		request.handler = std::make_shared<LambdaClickHandler>([] {});
+	}
+	return ClockedRequestRefusal(request, format);
+}
+
+// The window of probe slots[1] holding the rows slots[2] and slots[3].
+[[nodiscard]] QString HelperProbeWindow(
+		const std::vector<QString> &slots,
+		NumberFormat format) {
+	return ProbeWindowText(
+		slots[1],
+		4821,
+		5937,
+		{ slots[2], slots[3] },
+		format);
+}
+
+// A paired round trip keyed slots[1] that discarded slots[2], over an
+// empty window of probe slots[3].
+[[nodiscard]] QString HelperRoundTrip(
+		const std::vector<QString> &slots,
+		NumberFormat format) {
+	const auto trip = RoundTrip{
+		.state = RoundTripState::Paired,
+		.issueAtMs = 37645,
+		.answerAtMs = 37693,
+		.roundTripMs = 48,
+		.issues = 41,
+		.answers = 53,
+		.dropped = 52,
+		.preIssues = 67,
+		.preAnswers = 79,
+	};
+	return RoundTripText(
+		slots[1],
+		trip,
+		{ slots[2] },
+		ProbeWindowText(slots[3], 7293, 8352, {}, format),
+		format);
+}
+
+// One converted shared-helper row: |line| frames its formatter's output as
+// the helper's logging call writes it, for caller text |slots| and numbers
+// in |format|, and |ordinary| is today's text for kSelfHelperSlots.
+struct HelperRowCase {
+	QString label;
+	Fn<QString(const std::vector<QString> &slots, NumberFormat format)> line;
+	QString ordinary;
+};
+
+// Every converted row text. A framing prefix carries no digit: the
+// numbers, their field words and their order come only from the helper's
+// own formatter.
+[[nodiscard]] std::vector<HelperRowCase> HelperRowCases() {
+	using Slots = std::vector<QString>;
+	return {
+		{
+			u"geometry"_q,
+			[](const Slots &s, NumberFormat f) {
+				return GeometryText(s[0], QRect(-4821, 3764, 5937, 6148), f);
+			},
+			u"GEOMETRY: Selftest helper: x=-4821 y=3764 w=5937 h=6148"_q,
+		},
+		{
+			u"near"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: PASS: "_q
+					+ CheckNearText(4826, 4821, 37, s[0], f);
+			},
+			u"TEST_RESULT: PASS: Selftest helper (actual 4826, expected "
+			u"4821 ±37)"_q,
+		},
+		{
+			u"sample"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"NOTE: "_q
+					+ s[0]
+					+ u": "_q
+					+ PostPaintSampleText(kSelfHelperSample, f);
+			},
+			u"NOTE: Selftest helper: kind=post seq=4821 paint=37645 "
+			"last=37693 covered=59 lo=61482 hi=61537"_q,
+		},
+		{
+			u"stop"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"NOTE: "_q
+					+ PostPaintStopText(s[0], kSelfHelperStop, f);
+			},
+			u"NOTE: Selftest helper: kind=stop reason=owner-destroyed "
+			"seq=4821 pending=1 samples=3764 paints=5937 ignored=6148 "
+			"dropped=7293"_q,
+		},
+		{
+			u"frame"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"NOTE: "_q
+					+ s[0]
+					+ u": "_q
+					+ ClockedFrameText(kSelfHelperFrame, f);
+			},
+			u"NOTE: Selftest helper: kind=frame index=37 requested=4821 "
+			"reached=[3764,4829] tick=37645 waited=5937 probeTicks=41 "
+			"renderTicks=53"_q,
+		},
+		{
+			u"end gate"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: N/A: "_q
+					+ ClockedFrameSubject(s[0], kSelfHelperFrame, f)
+					+ u" - "_q
+					+ ClockedEndGateText(4821, 3764, f);
+			},
+			u"TEST_RESULT: N/A: Selftest helper: frame 37 at 4821 ms - "
+			"requested 4821 ms is at or after the declared animation end "
+			"3764 ms: no in-progress frame exists to judge, so nothing was "
+			"waited for, ticked or rendered"_q,
+		},
+		{
+			u"reached gate"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: N/A: "_q
+					+ ClockedFrameSubject(s[0], kSelfHelperFrame, f)
+					+ u" - "_q
+					+ ClockedReachedGateText(5937, 6148, 6143, f);
+			},
+			u"TEST_RESULT: N/A: Selftest helper: frame 37 at 4821 ms - the "
+			"tick reached [5937,6148] ms, at or after the declared animation "
+			"end 6143 ms: the animation may have finished, so no "
+			"in-progress frame exists to judge; the frame was not "
+			"rendered"_q,
+		},
+		{
+			u"no tick"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: FAIL: fixture gate: "_q
+					+ ClockedFrameSubject(s[0], kSelfHelperFrame, f)
+					+ u" - "_q
+					+ ClockedNoTickText(59, 7293, 8352, f);
+			},
+			u"TEST_RESULT: FAIL: fixture gate: Selftest helper: frame 37 at "
+			"4821 ms - manager-did-not-tick: "
+			"Core::App().animationManager().update() did not call the probe "
+			"animation (probe calls 59 before and after it, 7293 ms after "
+			"the action started, waited 8352 ms): the manager skipped the "
+			"tick - a schedule callback still pending (_scheduled; under "
+			"Manager::SetScheduleWithInvokeQueued(true) it is an "
+			"InvokeQueued call the postponed-call drain does not run) or an "
+			"update in progress (_updating); the frame was not rendered"_q,
+		},
+		{
+			u"render tick"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: FAIL: fixture gate: "_q
+					+ ClockedFrameSubject(s[0], kSelfHelperFrame, f)
+					+ u" - "_q
+					+ ClockedRenderTickText(41, f);
+			},
+			u"TEST_RESULT: FAIL: fixture gate: Selftest helper: frame 37 at "
+			"4821 ms - render-advanced-the-manager: the probe animation was "
+			"called 41 time(s) during the render, so the frame may show a "
+			"value past its reached elapsed bounds; render synchronously "
+			"(Test::GrabWidget / GrabRect), never through repaint() or "
+			"processEvents()"_q,
+		},
+		{
+			u"request flags"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: FAIL: fixture gate: "_q
+					+ s[0]
+					+ u": clocked frames refused - "_q
+					+ HelperRequestRefusal(s, true, { 4821 }, f);
+			},
+			u"TEST_RESULT: FAIL: fixture gate: Selftest helper: clocked "
+			"frames refused - exactly one of action and handler must be set "
+			"(action=1 handler=1)"_q,
+		},
+		{
+			u"request elapsed"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: FAIL: fixture gate: "_q
+					+ s[0]
+					+ u": clocked frames refused - "_q
+					+ HelperRequestRefusal(s, false, { 4821, 3764 }, f);
+			},
+			u"TEST_RESULT: FAIL: fixture gate: Selftest helper: clocked "
+			"frames refused - elapsed times must be non-negative and "
+			"strictly increasing, read 4821,3764"_q,
+		},
+		{
+			u"probe window"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: PASS: "_q
+					+ s[0]
+					+ u" - "_q
+					+ HelperProbeWindow(s, f);
+			},
+			u"TEST_RESULT: PASS: Selftest helper - probe=Selftest subject "
+			"window=[4821,5937) rows=Selftest control; Selftest rows"_q,
+		},
+		{
+			u"probe count"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: PASS: "_q
+					+ s[0]
+					+ u" - "_q
+					+ ProbeCountText(6148, 6148, HelperProbeWindow(s, f), f);
+			},
+			u"TEST_RESULT: PASS: Selftest helper - expected=6148 "
+			"actual=6148 probe=Selftest subject window=[4821,5937) "
+			"rows=Selftest control; Selftest rows"_q,
+		},
+		{
+			u"round trip"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: PASS: "_q
+					+ s[0]
+					+ u" - "_q
+					+ HelperRoundTrip(s, f);
+			},
+			u"TEST_RESULT: PASS: Selftest helper - key=Selftest subject "
+			"state=paired issues=41 answers=53 dropped=52 preIssues=67 "
+			"preAnswers=79 issueAtMs=37645 answerAtMs=37693 roundTripMs=48 "
+			"discarded=Selftest control probe=Selftest rows "
+			"window=[7293,8352) rows=<none>"_q,
+		},
+		{
+			u"scan tally"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"NOTE: "_q + HelperScan(s, 59).tallyText(f);
+			},
+			u"NOTE: Selftest helper: examined=4821 subject(Selftest "
+			"subject)=37 control(Selftest control)=59"_q,
+		},
+		{
+			u"scan refusal"_q,
+			[](const Slots &s, NumberFormat f) {
+				return u"TEST_RESULT: FAIL: "_q
+					+ s[0]
+					+ u" discriminates - "_q
+					+ HelperScan(s, 0).refusalText(f);
+			},
+			u"TEST_RESULT: FAIL: Selftest helper discriminates - the walk "
+			"matched no Selftest control, so its Selftest subject count of "
+			"37 over 4821 examined items cannot tell absence from an "
+			"enumeration that never reaches the subject"_q,
+		},
+	};
+}
+
+// One case's texts, each built once: both formats for kSelfHelperSlots
+// and for kSelfHelperPhraseSlots, and the ordinary text's digit runs.
+struct HelperRows {
+	QString ordinary;
+	QString telemetry;
+	QString phraseOrdinary;
+	QString phraseTelemetry;
+	std::vector<QString> runs;
+};
+
+[[nodiscard]] HelperRows BuildHelperRows(const HelperRowCase &entry) {
+	auto result = HelperRows{
+		.ordinary = entry.line(kSelfHelperSlots, NumberFormat::Ordinary),
+		.telemetry = entry.line(kSelfHelperSlots, NumberFormat::Telemetry),
+		.phraseOrdinary = entry.line(
+			kSelfHelperPhraseSlots,
+			NumberFormat::Ordinary),
+		.phraseTelemetry = entry.line(
+			kSelfHelperPhraseSlots,
+			NumberFormat::Telemetry),
+	};
+	result.runs = MaximalDigitRuns(result.ordinary);
+	return result;
+}
+
+// Whether |telemetry| differs from |ordinary| only by a "p" after each
+// number, and by at least one.
+[[nodiscard]] bool PointOnly(
+		const QString &telemetry,
+		const QString &ordinary) {
+	return (telemetry != ordinary)
+		&& (StripTelemetryPoints(telemetry) == ordinary);
+}
+
+// The shared helpers' numbers: every converted row read through its own
+// formatter for fixed synthetic values, in both formats. Never asks the
+// process-wide request and keeps no reading, so the earlier stages' rows
+// and readings stay as they were.
+void SelfHelperNumbers() {
+	const auto cases = HelperRowCases();
+	const auto count = int(cases.size());
+	auto rows = std::vector<HelperRows>();
+	for (const auto &entry : cases) {
+		rows.push_back(BuildHelperRows(entry));
+	}
+	{
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			if (rows[i].ordinary != cases[i].ordinary) {
+				failing.push_back(cases[i].label);
+			}
+		}
+		Check(
+			(count > 0) && failing.isEmpty(),
+			u"secrecy self-test: without the request every converted helper "
+			"row prints today's text"_q,
+			u"rows=%1 equal=%2 failing=[%3]"_q
+				.arg(count)
+				.arg(count - int(failing.size()))
+				.arg(failing.join(u", "_q)));
+	}
+	{
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto &row = rows[i];
+			if (!PointOnly(row.telemetry, row.ordinary)
+				|| !PointOnly(row.phraseTelemetry, row.phraseOrdinary)) {
+				failing.push_back(cases[i].label);
+			}
+		}
+		Check(
+			(count > 0) && failing.isEmpty(),
+			u"secrecy self-test: under the request every converted helper "
+			"row differs from today's text only by a p after each number"_q,
+			u"rows=%1 pointOnly=%2 failing=[%3]"_q
+				.arg(count)
+				.arg(count - int(failing.size()))
+				.arg(failing.join(u", "_q)));
+	}
+	{
+		const auto what = u"secrecy self-test: the digit runs of each "
+			"converted helper row's ordinary text, as synthetic short "
+			"secrets, fail the scan at that row"_q;
+		auto secrets = 0;
+		auto boundedAlone = 0;
+		auto clientWritten = 0;
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto &row = rows[i];
+			const auto runs = int(row.runs.size());
+			const auto alone = ScanRow(row.ordinary, row.runs);
+			const auto run = RunFixture(RowFixture(row.ordinary, row.runs));
+			CheckPrepared(what, run);
+			const auto &r = run.reading;
+			const auto &t = ClassOf(r, SecrecyClass::TestLog);
+			auto sites = 0;
+			for (const auto &[site, hits] : t.plainSites) {
+				sites += hits;
+			}
+			secrets += runs;
+			boundedAlone += alone.boundedOther;
+			clientWritten += r.clientWritten();
+			const auto ok = run.prepared
+				&& r.decided
+				&& !r.clean
+				&& (alone.bounded >= runs)
+				&& (alone.boundedOther == alone.bounded)
+				&& (t.boundedOther == alone.boundedOther)
+				&& (sites == t.boundedOther)
+				&& (r.clientWritten() == alone.boundedOther);
+			if (!ok) {
+				failing.push_back(cases[i].label);
+			}
+		}
+		Check(
+			(count > 0) && failing.isEmpty(),
+			what,
+			u"rows=%1 secrets=%2 boundedAlone=%3 clientWritten=%4 "
+			"failing=[%5]"_q
+				.arg(count)
+				.arg(secrets)
+				.arg(boundedAlone)
+				.arg(clientWritten)
+				.arg(failing.join(u", "_q)));
+	}
+	{
+		const auto what = u"secrecy self-test: under the request no "
+			"converted helper row holds a bounded digit run, and a scan whose "
+			"only candidate is that row is clean"_q;
+		auto digitRuns = 0;
+		auto bounded = 0;
+		auto embedded = 0;
+		auto clean = 0;
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto &row = rows[i];
+			const auto all = DigitRuns(row.telemetry);
+			const auto alone = ScanRow(row.telemetry, all);
+			const auto run = RunFixture(RowFixture(row.telemetry, row.runs));
+			CheckPrepared(what, run);
+			const auto &r = run.reading;
+			const auto &t = ClassOf(r, SecrecyClass::TestLog);
+			digitRuns += int(all.size());
+			bounded += alone.bounded;
+			embedded += alone.embedded;
+			const auto scanClean = run.prepared && r.decided && r.clean;
+			if (scanClean) {
+				++clean;
+			}
+			const auto ok = (alone.bounded == 0)
+				&& (alone.embedded >= int(all.size()))
+				&& scanClean
+				&& (t.bounded == 0)
+				&& (r.clientWritten() == 0);
+			if (!ok) {
+				failing.push_back(cases[i].label);
+			}
+		}
+		Check(
+			(count > 0) && (digitRuns > 0) && failing.isEmpty(),
+			what,
+			u"rows=%1 digitRuns=%2 bounded=%3 embedded=%4 clean=%5 "
+			"failing=[%6]"_q
+				.arg(count)
+				.arg(digitRuns)
+				.arg(bounded)
+				.arg(embedded)
+				.arg(clean)
+				.arg(failing.join(u", "_q)));
+	}
+	{
+		// The premise: the phrase reading can see a split.
+		const auto between = [](const QString &number) {
+			return PhraseRuns(u"NOTE: "_q
+				+ kSelfHelperPhraseSlots[1]
+				+ QChar(' ')
+				+ number
+				+ QChar(' ')
+				+ kSelfHelperPhraseSlots[2]);
+		};
+		const auto ordinary = between(u"4821"_q);
+		const auto telemetry = between(TelemetryNumber(4821));
+		Check(
+			ordinary == telemetry + 1,
+			u"secrecy self-test: a TelemetryNumber between two phrase words "
+			"ends the run an ordinary number left joined"_q,
+			u"ordinary=%1 telemetry=%2"_q.arg(ordinary).arg(telemetry));
+	}
+	{
+		auto runs = QStringList();
+		auto ordinary = 0;
+		auto telemetry = 0;
+		auto failing = QStringList();
+		for (auto i = 0; i != count; ++i) {
+			const auto ordinaryRuns = PhraseRuns(rows[i].phraseOrdinary);
+			const auto telemetryRuns = PhraseRuns(rows[i].phraseTelemetry);
+			runs.push_back(u"%1=%2/%3"_q
+				.arg(cases[i].label)
+				.arg(ordinaryRuns)
+				.arg(telemetryRuns));
+			ordinary += ordinaryRuns;
+			telemetry += telemetryRuns;
+			if (ordinaryRuns != telemetryRuns || ordinaryRuns < 1) {
+				failing.push_back(cases[i].label);
+			}
+		}
+		Check(
+			(count > 0) && failing.isEmpty(),
+			u"secrecy self-test: a synthetic phrase in each converted helper "
+			"row's caller text gives the same word runs in both formats"_q,
+			u"rows=%1 runs=[%2] ordinary=%3 telemetry=%4 failing=[%5]"_q
+				.arg(count)
+				.arg(runs.join(u", "_q))
+				.arg(ordinary)
+				.arg(telemetry)
+				.arg(failing.join(u", "_q)));
+	}
+}
+
+// The carried transport lines' synthetic short secret, digits only because
+// transport numbers are digits, and the other synthetic values their slots
+// and DEBUG_LOG suffix print.
+const auto kSelfTransportSecret = u"73914"_q;
+const auto kSelfTransportSize = u"52817"_q;
+const auto kSelfTransportOther = u"40963"_q;
+const auto kSelfTransportTime = u"1768478123"_q;
+const auto kSelfTransportRequest = u"68305"_q;
+const auto kSelfTransportLine = u"37"_q;
+const auto kSelfTransportToken = u"1768478123528170001"_q;
+const auto kSelfTransportPart = u"DebugLogs/log_10_00.txt"_q;
+const auto kSelfPrivateFile = u"session_private.cpp"_q;
+const auto kSelfInstanceFile = u"mtp_instance.cpp"_q;
+const auto kSelfSendingHead = u"MTP Info: sending request"_q;
+const auto kSelfParserHead = u"RPC Info: found parser for request"_q;
+const auto kSelfAckHead = u"Message Info: ignoring ACK for msgId"_q;
+const auto kSelfChangingHead = u"MTP Info: changing request"_q;
+const auto kSelfKeyHead = u"AuthKey Info: unbound key creation succeed"_q;
+
+// The withholding cases' own secrets, each scanned with the key-creation or
+// the queue line: the first three make the printed head, the slot name or
+// a phrase across both hold a secret without being bounded in that line,
+// the last two are bounded words before its first number. Never printed,
+// not even as a label.
+const auto kSelfHeadSecret = u"UNBOUND"_q;
+const auto kSelfSlotSecret = u"TemporaryKeyId"_q;
+const auto kSelfSpanPhrase = std::vector<QString>{
+	u"succeed"_q,
+	u"temporaryKeyId"_q,
+};
+const auto kSelfHeadWord = u"creation"_q;
+const auto kSelfGapWord = u"thread"_q;
+
+// A DEBUG_LOG line as base::LogWriteDebug and Logs::writeDebug write it into
+// a DebugLogs log_ part: "<entry start> <message> (<file> : <line>)".
+[[nodiscard]] QString DebugEntry(
+		const QString &message,
+		const QString &file,
+		const QString &line = kSelfTransportLine) {
+	return Entry(message + u" ("_q + file + u" : "_q + line + u")"_q);
+}
+
+// SessionPrivate::sendSecureRequest's message, built by hand from its
+// format, independently of the carried table.
+[[nodiscard]] QString SendingMessage(
+		const QString &size,
+		const QString &num,
+		const QString &time) {
+	return u"MTP Info: sending request, size: "_q
+		+ size
+		+ u", num: "_q
+		+ num
+		+ u", time: "_q
+		+ time;
+}
+
+[[nodiscard]] QString SendingEntry(
+		const QString &num,
+		const QString &line = kSelfTransportLine) {
+	return DebugEntry(
+		SendingMessage(kSelfTransportSize, num, kSelfTransportTime),
+		kSelfPrivateFile,
+		line);
+}
+
+// Instance::Private::processCallback's line.
+[[nodiscard]] QString ParserEntry(const QString &request) {
+	return DebugEntry(
+		u"RPC Info: found parser for request "_q
+			+ request
+			+ u", trying to parse response..."_q,
+		kSelfInstanceFile);
+}
+
+// SessionPrivate::requestsAcked's line: a server-sent msgId beside the
+// client's own request id.
+[[nodiscard]] QString AckEntry(const QString &msgId, const QString &request) {
+	return DebugEntry(
+		u"Message Info: ignoring ACK for msgId "_q
+			+ msgId
+			+ u" because request "_q
+			+ request
+			+ u" requires a response"_q,
+		kSelfPrivateFile);
+}
+
+// Instance::Private::onErrorDefault's line, both dc slots glued.
+[[nodiscard]] QString ChangingEntry(const QString &from, const QString &to) {
+	return DebugEntry(
+		u"MTP Info: changing request "_q
+			+ kSelfTransportRequest
+			+ u" from dcWithShift"_q
+			+ from
+			+ u" to dc"_q
+			+ to,
+		kSelfInstanceFile);
+}
+
+// SessionPrivate::tryAcquireKeyCreation's line with |keyId| as the
+// temporary key id.
+[[nodiscard]] QString KeyCreationEntry(const QString &keyId) {
+	return DebugEntry(
+		kSelfKeyHead
+			+ u", ids: ("_q
+			+ keyId
+			+ u", "_q
+			+ kSelfTransportSize
+			+ u") server salts: ("_q
+			+ kSelfTransportOther
+			+ u", "_q
+			+ kSelfTransportRequest
+			+ u")"_q,
+		kSelfPrivateFile);
+}
+
+// SessionPrivate::handleReceived's queue line.
+[[nodiscard]] QString QueueEntry() {
+	return DebugEntry(
+		u"MTP Info: queueTryToReceive() - need to parse in another thread, "_q
+			+ kSelfTransportSize
+			+ u" messages."_q,
+		kSelfPrivateFile);
+}
+
+[[nodiscard]] QString TransportSite(
+		const QString &head,
+		const QString &field,
+		const QString &file = kSelfTransportPart) {
+	return file + QChar('|') + head + QChar('|') + field;
+}
+
+[[nodiscard]] QString WithheldSite(const QString &file = kSelfTransportPart) {
+	return file + QChar('|') + kSiteWithheld;
+}
+
+[[nodiscard]] SecrecySecrets TransportSecrets() {
+	return { .shortSecrets = { kSelfTransportSecret } };
+}
+
+// The clean tree with the synthetic number as one more short secret.
+[[nodiscard]] SelfFixture TransportFixture() {
+	auto result = CleanFixture();
+	result.secrets.shortSecrets.push_back(kSelfTransportSecret);
+	return result;
+}
+
+// One text alone through the scan's own matcher under the public file name
+// |file|: no canary, planted control or other line.
+[[nodiscard]] SecrecyClassReading ScanTransportLine(
+		const QString &text,
+		const SecrecySecrets &secrets,
+		const QString &file = kSelfTransportPart,
+		std::vector<SecrecyComputedField> declared = {}) {
+	const auto matcher = SecrecyMatcher(secrets, std::move(declared));
+	auto result = SecrecyClassReading();
+	ScanText(text, matcher, {}, {}, result, file);
+	return result;
+}
+
+// What one isolated scan must read: exactly these computed and deciding
+// plain-line sites, this embedded count (-1: not checked) and nothing else.
+struct TransportExpect {
+	std::map<QString, int> computed;
+	std::map<QString, int> plain;
+	int embedded = 0;
+};
+
+[[nodiscard]] int HitsIn(const std::map<QString, int> &sites) {
+	auto result = 0;
+	for (const auto &[site, hits] : sites) {
+		result += hits;
+	}
+	return result;
+}
+
+[[nodiscard]] bool TransportReads(
+		const SecrecyClassReading &c,
+		const TransportExpect &expect) {
+	const auto computed = HitsIn(expect.computed);
+	const auto plain = HitsIn(expect.plain);
+	return (c.bounded == computed + plain)
+		&& (c.boundedComputed == computed)
+		&& (c.boundedOther == plain)
+		&& (c.computedSites == expect.computed)
+		&& (c.plainSites == expect.plain)
+		&& (expect.embedded < 0 || c.embedded == expect.embedded)
+		&& !c.boundedSend
+		&& !c.boundedRecv
+		&& !c.wordRunsOther
+		&& !c.tokensOther;
+}
+
+// One isolated case: a generic label, never a secret or a scanned value,
+// the text, what its scan must read, the public file name and the secrets.
+struct TransportCase {
+	QString label;
+	QString text;
+	TransportExpect expect;
+	QString file = kSelfTransportPart;
+	SecrecySecrets secrets = TransportSecrets();
+};
+
+// Scans each case alone and answers the failing ones as "<index>:<label>".
+// With |rowsPrivate| a case also fails when its class row (ClassRow) holds
+// any of its short secrets or phrase words, case-insensitively.
+[[nodiscard]] QStringList TransportFailing(
+		const std::vector<TransportCase> &cases,
+		bool rowsPrivate) {
+	auto result = QStringList();
+	for (auto i = 0; i != int(cases.size()); ++i) {
+		const auto &entry = cases[i];
+		const auto c = ScanTransportLine(entry.text, entry.secrets, entry.file);
+		auto ok = TransportReads(c, entry.expect);
+		if (rowsPrivate) {
+			const auto row = ClassRow(c);
+			auto secrets = entry.secrets.shortSecrets;
+			for (const auto &phrase : entry.secrets.phrases) {
+				secrets.insert(end(secrets), begin(phrase), end(phrase));
+			}
+			for (const auto &secret : secrets) {
+				ok = ok && !row.contains(secret, Qt::CaseInsensitive);
+			}
+		}
+		if (!ok) {
+			result.push_back(u"%1:%2"_q.arg(i).arg(entry.label));
+		}
+	}
+	return result;
+}
+
+void CheckTransportCases(
+		const QString &what,
+		const std::vector<TransportCase> &cases,
+		bool rowsPrivate = false) {
+	const auto failing = TransportFailing(cases, rowsPrivate);
+	Check(
+		!cases.empty() && failing.isEmpty(),
+		what,
+		u"cases=%1 failing=[%2]"_q
+			.arg(cases.size())
+			.arg(failing.join(u", "_q)));
+}
+
+// Whether placeholder |index| (0-based) of |format| touches a letter or a
+// digit, so that a whole positive value there is only ever embedded.
+[[nodiscard]] bool TransportGlued(const QString &format, int index) {
+	const auto placeholder = u"%"_q + QString::number(index + 1);
+	const auto at = int(format.indexOf(placeholder));
+	if (at < 0) {
+		return false;
+	}
+	const auto till = at + int(placeholder.size());
+	return (at > 0 && format[at - 1].isLetterOrNumber())
+		|| (till < int(format.size()) && format[till].isLetterOrNumber());
+}
+
+// Every carried row and slot, mechanics only: the row's message as its
+// product call builds it (.arg() by .arg()), with the synthetic number in
+// that slot and other synthetic values in the rest, scanned alone in a
+// log_ part. The table's shape holds (a known source file, distinct
+// formats, a HeadShaped head, distinct safe slot names, no computed glued
+// slot), exactly that row matches the line, with no "name=" field and every
+// value at its span, and the number reads as the slot's class says: a
+// computed slot at its site in computedSites, any other bounded slot at its
+// site deciding, a glued slot only embedded. Generated from the table, it
+// cannot prove the table's source provenance.
+void CheckTransportSweep() {
+	const auto &lines = TransportLines();
+	const auto files = QStringList{
+		u"session_private.cpp"_q,
+		u"session.cpp"_q,
+		u"mtp_instance.cpp"_q,
+	};
+	const auto fillers = std::vector<QString>{
+		kSelfTransportSize,
+		kSelfTransportOther,
+		kSelfTransportRequest,
+		kSelfTransportTime,
+	};
+	auto formats = QSet<QString>();
+	auto slots = 0;
+	auto computed = 0;
+	auto received = 0;
+	auto glued = 0;
+	auto failing = QStringList();
+	for (auto i = 0; i != int(lines.size()); ++i) {
+		const auto &line = lines[i];
+		const auto head = TransportHead(line.format);
+		const auto count = int(line.slots.size());
+		auto names = QSet<QString>();
+		auto shaped = files.contains(line.file)
+			&& !formats.contains(line.format)
+			&& HeadShaped(head)
+			&& (count > 0)
+			&& (count <= int(fillers.size()));
+		formats.insert(line.format);
+		for (auto j = 0; j != count; ++j) {
+			const auto &slot = line.slots[j];
+			shaped = shaped
+				&& (SafeIdentifier(slot.name) == slot.name)
+				&& !names.contains(slot.name)
+				&& !(slot.computed && TransportGlued(line.format, j));
+			names.insert(slot.name);
+		}
+		if (!shaped) {
+			failing.push_back(QString::number(i));
+			continue;
+		}
+		for (auto j = 0; j != count; ++j) {
+			auto values = std::vector<QString>();
+			auto message = line.format;
+			for (auto k = 0; k != count; ++k) {
+				values.push_back((k == j) ? kSelfTransportSecret : fillers[k]);
+				message = message.arg(values.back());
+			}
+			const auto text = DebugEntry(message, line.file);
+			const auto from = MessageFrom(text);
+			const auto spans = TransportSpans(line, text, from);
+			auto matching = 0;
+			for (const auto &other : lines) {
+				if (!TransportSpans(other, text, from).empty()) {
+					++matching;
+				}
+			}
+			auto ok = (matching == 1)
+				&& PlainFields(text, from).empty()
+				&& (int(spans.size()) == count);
+			for (auto k = 0; ok && k != count; ++k) {
+				const auto &[spanFrom, spanTill] = spans[k];
+				ok = (text.mid(spanFrom, spanTill - spanFrom) == values[k]);
+			}
+			const auto c = ScanTransportLine(text, TransportSecrets());
+			const auto site = TransportSite(head, line.slots[j].name);
+			if (TransportGlued(line.format, j)) {
+				++glued;
+				ok = ok && TransportReads(c, { .embedded = 1 });
+			} else if (line.slots[j].computed) {
+				++computed;
+				ok = ok && TransportReads(c, { .computed = { { site, 1 } } });
+			} else {
+				++received;
+				ok = ok && TransportReads(c, { .plain = { { site, 1 } } });
+			}
+			++slots;
+			if (!ok) {
+				failing.push_back(u"%1.%2"_q.arg(i).arg(j));
+			}
+		}
+	}
+	Check(
+		!lines.empty()
+			&& (computed > 0)
+			&& (received > 0)
+			&& (glued > 0)
+			&& failing.isEmpty(),
+		u"secrecy self-test: every carried transport row matches only its "
+		"own line, and the synthetic number in each of its slots reads as "
+		"the slot's class says: computed, deciding at its site, or "
+		"embedded"_q,
+		u"rows=%1 slots=%2 computed=%3 received=%4 glued=%5 failing=[%6]"_q
+			.arg(lines.size())
+			.arg(slots)
+			.arg(computed)
+			.arg(received)
+			.arg(glued)
+			.arg(failing.join(u", "_q)));
+}
+
+// What no row of the transport stage may carry: SelfForbidden(), the
+// synthetic number, every other synthetic value it prints in a slot, the
+// token and the withholding cases' secrets.
+[[nodiscard]] QStringList TransportForbidden() {
+	auto result = SelfForbidden();
+	result += QStringList{
+		kSelfTransportSecret,
+		kSelfTransportSize,
+		kSelfTransportOther,
+		kSelfTransportTime,
+		kSelfTransportRequest,
+		kSelfTransportToken,
+		kSelfHeadSecret,
+		kSelfSlotSecret,
+		kSelfHeadWord,
+		kSelfGapWord,
+	};
+	for (const auto &word : kSelfSpanPhrase) {
+		result.push_back(word);
+	}
+	return result;
+}
+
+[[nodiscard]] QStringList TransportLeaksIn(const QStringList &rows) {
+	const auto forbidden = TransportForbidden();
+	auto result = QStringList();
+	for (const auto &row : rows) {
+		for (auto i = 0; i != int(forbidden.size()); ++i) {
+			if (row.contains(forbidden[i], Qt::CaseInsensitive)) {
+				// The index only: the forbidden string itself is a secret.
+				result.push_back(u"forbidden#%1"_q.arg(i));
+			}
+		}
+	}
+	return result;
+}
+
+// The carried transport lines (TransportLines): a bounded hit that is
+// exactly the whole integer of a computed slot is reported at its site and
+// does not decide, while every other position, line shape, file and rule
+// still decides as before. Never asks the process-wide telemetry request
+// and keeps no reading, so the earlier stages' rows and readings stay as
+// they were.
+void SelfTransport() {
+	using Sites = std::map<QString, int>;
+	const auto secret = kSelfTransportSecret;
+	const auto numSite = TransportSite(kSelfSendingHead, u"num"_q);
+	const auto requestSite = TransportSite(kSelfParserHead, u"request"_q);
+	const auto ackSite = TransportSite(kSelfAckHead, u"msgId"_q);
+	const auto dashSite = TransportSite(kSelfSendingHead, kSiteNoField);
+	const auto withheld = WithheldSite();
+	const auto positives = QStringList{
+		SendingEntry(secret),
+		ParserEntry(secret),
+	};
+	const auto message = SendingMessage(
+		kSelfTransportSize,
+		secret,
+		kSelfTransportTime);
+	const auto suffix = u" (session_private.cpp : 37)"_q;
+	const auto computedRow = u"SECRECY_COMPUTED: total=2 sites=[DebugLog|"_q
+		+ numSite
+		+ u" x1, DebugLog|"_q
+		+ requestSite
+		+ u" x1] (reported, non-deciding)"_q;
+	auto readings = std::vector<SecrecyReading>();
+	auto runs = 0;
+	const auto runCounted = [&](const QString &what, const SelfFixture &f) {
+		const auto result = RunFixture(f);
+		CheckPrepared(what, result);
+		++runs;
+		if (result.prepared) {
+			readings.push_back(result.reading);
+		}
+		return result;
+	};
+	const auto tail = [](const SecrecyReading &r) {
+		return u" | "_q
+			+ Summary(r)
+			+ u" computed="_q
+			+ QString::number(r.computed());
+	};
+
+	auto principal = SelfRun();
+	{
+		const auto what = u"secrecy self-test: a synthetic number that is "
+			"exactly a computed number of a carried transport line is "
+			"reported at its site and does not decide, so a scan whose only "
+			"candidates are those lines is clean"_q;
+		auto fixture = TransportFixture();
+		fixture.parts[u"log_10_00.txt"_q] += positives;
+		principal = runCounted(what, fixture);
+		const auto &r = principal.reading;
+		const auto &debug = ClassOf(r, SecrecyClass::DebugLog);
+		Check(
+			principal.prepared
+				&& r.decided
+				&& r.clean
+				&& (r.clientWritten() == 0)
+				&& (r.computed() == 2)
+				&& (debug.boundedComputed == 2)
+				&& (debug.boundedOther == 0)
+				&& debug.plainSites.empty()
+				&& (debug.computedSites == Sites{
+					{ numSite, 1 },
+					{ requestSite, 1 },
+				})
+				&& SecrecyRows(r).contains(computedRow),
+			what,
+			SiteDetails(debug) + tail(r));
+	}
+
+	struct Tree {
+		QString name;
+		Fn<void(SelfFixture&)> plant;
+		SecrecyClass cls = SecrecyClass::DebugLog;
+		Sites plain;
+		Sites computed;
+		bool written = false; // its rows are also written to the test log
+	};
+	const auto addLog = [](SelfFixture &f, const QStringList &lines) {
+		f.parts[u"log_10_00.txt"_q] += lines;
+	};
+	const auto trees = std::vector<Tree>{
+		{
+			u"is the digits of a negative computed value"_q,
+			[=](SelfFixture &f) { addLog(f, { SendingEntry(u"-"_q + secret) }); },
+			SecrecyClass::DebugLog,
+			{ { dashSite, 1 } },
+		},
+		{
+			u"is the line number of the DEBUG_LOG suffix"_q,
+			[=](SelfFixture &f) {
+				addLog(f, { SendingEntry(kSelfTransportOther, secret) });
+			},
+			SecrecyClass::DebugLog,
+			{ { dashSite, 1 } },
+		},
+		{
+			u"is a server-sent msgId beside the client's own request id"_q,
+			[=](SelfFixture &f) {
+				addLog(f, { AckEntry(secret, kSelfTransportRequest) });
+			},
+			SecrecyClass::DebugLog,
+			{ { ackSite, 1 } },
+			{},
+			true,
+		},
+		{
+			u"is that msgId while its head and field are declared "
+				"computed"_q,
+			[=](SelfFixture &f) {
+				addLog(f, { AckEntry(secret, kSelfTransportRequest) });
+				f.computed.push_back({
+					.head = kSelfAckHead,
+					.field = u"msgId"_q,
+				});
+			},
+			SecrecyClass::DebugLog,
+			{ { ackSite, 1 } },
+		},
+		{
+			u"sits in a carried message with an added field"_q,
+			[=](SelfFixture &f) {
+				const auto added = message + u", seq: "_q + kSelfTransportOther;
+				addLog(f, { DebugEntry(added, kSelfPrivateFile) });
+			},
+			SecrecyClass::DebugLog,
+			{ { withheld, 1 } },
+		},
+		{
+			u"is free text after a carried line"_q,
+			[=](SelfFixture &f) {
+				addLog(f, {
+					SendingEntry(kSelfTransportOther) + u" retry "_q + secret,
+				});
+			},
+			SecrecyClass::DebugLog,
+			{ { withheld, 1 } },
+		},
+		{
+			u"sits in a carried message whose suffix names a harness "
+				"file"_q,
+			[=](SelfFixture &f) {
+				addLog(f, { DebugEntry(message, u"test_secrecy_scan.cpp"_q) });
+			},
+			SecrecyClass::DebugLog,
+			{ { withheld, 1 } },
+		},
+		{
+			u"is a plain-line leak beside two exempted numbers"_q,
+			[=](SelfFixture &f) {
+				addLog(f, positives);
+				addLog(f, { Entry(u"Selftest Info: value "_q + secret) });
+			},
+			SecrecyClass::DebugLog,
+			{ { withheld, 1 } },
+			{ { numSite, 1 }, { requestSite, 1 } },
+		},
+		{
+			u"sits in a carried line written to the test log"_q,
+			[=](SelfFixture &f) {
+				InsertBeforePlanted(f.testLog, { SendingEntry(secret) });
+			},
+			SecrecyClass::TestLog,
+			{ { WithheldSite(u"test_log.txt"_q), 1 } },
+		},
+		{
+			u"sits in a carried line written to the app log"_q,
+			[=](SelfFixture &f) { f.appLog.push_back(SendingEntry(secret)); },
+			SecrecyClass::AppLog,
+			{ { WithheldSite(u"log.txt"_q), 1 } },
+		},
+		{
+			u"sits in a carried line written to an mtp_ part"_q,
+			[=](SelfFixture &f) {
+				InsertBeforePlanted(
+					f.parts[u"mtp_10_00.txt"_q],
+					{ SendingEntry(secret) });
+			},
+			SecrecyClass::MtpLog,
+			{ { WithheldSite(u"DebugLogs/mtp_10_00.txt"_q), 1 } },
+		},
+	};
+	auto received = SelfRun();
+	for (const auto &tree : trees) {
+		const auto what = u"secrecy self-test: the synthetic number still "
+			"fails the scan when it "_q
+			+ tree.name;
+		auto fixture = TransportFixture();
+		tree.plant(fixture);
+		const auto result = runCounted(what, fixture);
+		const auto &r = result.reading;
+		const auto &c = ClassOf(r, tree.cls);
+		const auto plain = HitsIn(tree.plain);
+		const auto computed = HitsIn(tree.computed);
+		Check(
+			result.prepared
+				&& r.decided
+				&& !r.clean
+				&& (r.clientWritten() == plain)
+				&& (r.computed() == computed)
+				&& (c.boundedOther == plain)
+				&& (c.boundedComputed == computed)
+				&& (c.plainSites == tree.plain)
+				&& (c.computedSites == tree.computed),
+			what,
+			SiteDetails(c) + tail(r));
+		if (tree.written) {
+			received = result;
+		}
+	}
+
+	const auto earlierName = u"log_09_00.txt"_q;
+	const auto earlierSite = TransportSite(
+		kSelfSendingHead,
+		u"num"_q,
+		u"DebugLogs/"_q + earlierName);
+	const auto earlierFixture = [&](bool withControl) {
+		auto result = TransportFixture();
+		auto part = QStringList{ kSelfToday, SendingEntry(secret) };
+		if (withControl) {
+			part.push_back(Entry(kSelfEarlierControl));
+		}
+		result.parts[earlierName] = part;
+		result.earlier.push_back({
+			.name = earlierName,
+			.day = kSelfDay,
+			.control = kSelfEarlierControl,
+		});
+		return result;
+	};
+	{
+		const auto what = u"secrecy self-test: in an accepted earlier log_ "
+			"part the same computed number is reported and does not "
+			"decide"_q;
+		const auto result = runCounted(what, earlierFixture(true));
+		const auto &r = result.reading;
+		const auto &c = ClassOf(r, SecrecyClass::EarlierParts);
+		Check(
+			result.prepared
+				&& r.decided
+				&& r.clean
+				&& (r.computed() == 1)
+				&& (c.files == 1)
+				&& (c.controlHits == 1)
+				&& c.decided
+				&& (c.boundedComputed == 1)
+				&& c.plainSites.empty()
+				&& (c.computedSites == Sites{ { earlierSite, 1 } }),
+			what,
+			SiteDetails(c) + tail(r));
+	}
+	{
+		const auto what = u"secrecy self-test: an earlier log_ part whose "
+			"only hit is that exempted number still needs its own control "
+			"and is refused as undecided without it"_q;
+		const auto result = runCounted(what, earlierFixture(false));
+		const auto &r = result.reading;
+		const auto &c = ClassOf(r, SecrecyClass::EarlierParts);
+		Check(
+			result.prepared
+				&& !r.decided
+				&& (c.files == 1)
+				&& (c.withoutControl == 1)
+				&& !c.decided
+				&& c.undecidedReason.contains(
+					u"part without its own control"_q)
+				&& (c.boundedComputed == 1)
+				&& (c.computedSites == Sites{ { earlierSite, 1 } }),
+			what,
+			SiteDetails(c) + tail(r));
+	}
+
+	CheckTransportSweep();
+
+	const auto only = [](const QString &value) {
+		return SecrecySecrets{ .shortSecrets = { value } };
+	};
+	CheckTransportCases(
+		u"secrecy self-test: only a carried slot's whole computed integer is "
+		"exempted: a positive, zero or whole negative value is, while the "
+		"digits under its minus, a server-sent slot beside it and a glued "
+		"slot's digits under a minus decide, and a digit run inside a "
+		"longer integer or a glued positive value stays embedded"_q,
+		{
+			{
+				.label = u"positive"_q,
+				.text = SendingEntry(secret),
+				.expect = { .computed = { { numSite, 1 } } },
+			},
+			{
+				.label = u"zero"_q,
+				.text = SendingEntry(u"0"_q),
+				.expect = { .computed = { { numSite, 1 } }, .embedded = -1 },
+				.secrets = only(u"0"_q),
+			},
+			{
+				.label = u"whole negative"_q,
+				.text = SendingEntry(u"-"_q + secret),
+				.expect = { .computed = { { numSite, 1 } } },
+				.secrets = only(u"-"_q + secret),
+			},
+			{
+				.label = u"digits under a minus"_q,
+				.text = SendingEntry(u"-"_q + secret),
+				.expect = { .plain = { { dashSite, 1 } } },
+			},
+			{
+				.label = u"two computed slots"_q,
+				.text = DebugEntry(
+					SendingMessage(secret, secret, kSelfTransportTime),
+					kSelfPrivateFile),
+				.expect = {
+					.computed = {
+						{ TransportSite(kSelfSendingHead, u"size"_q), 1 },
+						{ numSite, 1 },
+					},
+				},
+			},
+			{
+				.label = u"computed beside server-sent"_q,
+				.text = AckEntry(secret, secret),
+				.expect = {
+					.computed = {
+						{ TransportSite(kSelfAckHead, u"request"_q), 1 },
+					},
+					.plain = { { ackSite, 1 } },
+				},
+			},
+			{
+				.label = u"glued digits under a minus"_q,
+				.text = ChangingEntry(u"-"_q + secret, u"4"_q),
+				.expect = {
+					.plain = {
+						{ TransportSite(kSelfChangingHead, kSiteNoField), 1 },
+					},
+				},
+			},
+			{
+				.label = u"glued positive"_q,
+				.text = ChangingEntry(secret, u"4"_q),
+				.expect = { .embedded = 1 },
+			},
+			{
+				.label = u"glued server-sent"_q,
+				.text = ChangingEntry(u"2"_q, secret),
+				.expect = { .embedded = 1 },
+			},
+			{
+				.label = u"longer integer"_q,
+				.text = SendingEntry(u"1"_q + secret),
+				.expect = { .embedded = 1 },
+			},
+		});
+
+	{
+		auto cases = std::vector<TransportCase>{
+			{
+				.label = u"window part"_q,
+				.text = SendingEntry(secret),
+				.expect = { .computed = { { numSite, 1 } } },
+			},
+			{
+				.label = u"another quarter"_q,
+				.text = SendingEntry(secret),
+				.expect = {
+					.computed = {
+						{
+							TransportSite(
+								kSelfSendingHead,
+								u"num"_q,
+								u"DebugLogs/log_23_45.txt"_q),
+							1,
+						},
+					},
+				},
+				.file = u"DebugLogs/log_23_45.txt"_q,
+			},
+		};
+		const auto others = QStringList{
+			u"test_log.txt"_q,
+			u"log.txt"_q,
+			u"DebugLogs/mtp_10_00.txt"_q,
+			QString(),
+			u"log_10_00.txt"_q,
+			u"DebugLogs/log_10_00.txt.bak"_q,
+			u"logs/DebugLogs/log_10_00.txt"_q,
+			u"DebugLogs/log_10_0.txt"_q,
+			u"DebugLogs/(invalid name)"_q,
+			u"DebugLogs/log_10_00.txt\n"_q,
+			u"DebugLogs/log_1"_q + QChar(0x0660) + u"_00.txt"_q,
+		};
+		for (const auto &file : others) {
+			cases.push_back({
+				.label = u"file#%1"_q.arg(cases.size()),
+				.text = SendingEntry(secret),
+				.expect = { .plain = { { WithheldSite(file), 1 } } },
+				.file = file,
+			});
+		}
+		CheckTransportCases(
+			u"secrecy self-test: the identical carried line is exempted only "
+			"under a DebugLogs log_ part name and keeps the withheld site "
+			"under every other public file name"_q,
+			cases);
+	}
+
+	{
+		const auto shapes = std::vector<std::pair<QString, QString>>{
+			{ u"no entry start"_q, message + suffix },
+			{
+				u"one-digit thread"_q,
+				u"[10:05:00.000 1-0000001] "_q + message + suffix,
+			},
+			{
+				u"six-digit index"_q,
+				u"[10:05:00.000 01-000001] "_q + message + suffix,
+			},
+			{
+				u"non-ASCII index digit"_q,
+				u"[10:05:00.000 01-000000"_q
+					+ QChar(0x0661)
+					+ u"] "_q
+					+ message
+					+ suffix,
+			},
+			{
+				u"no closing bracket"_q,
+				u"[10:05:00.000 01-0000001 "_q + message + suffix,
+			},
+			{
+				u"mtp_ prefix"_q,
+				u"[10:05:00.000 01-0000001] (dc:2_main) "_q + message + suffix,
+			},
+			{
+				u"app log start"_q,
+				u"[2026.01.15 10:05:00] "_q + message + suffix,
+			},
+			{ u"no suffix"_q, Entry(message) },
+			{
+				u"another product file"_q,
+				DebugEntry(message, u"session.cpp"_q),
+			},
+			{
+				u"harness file"_q,
+				DebugEntry(message, u"test_secrecy_scan.cpp"_q),
+			},
+			{
+				u"no line number"_q,
+				DebugEntry(message, kSelfPrivateFile, QString()),
+			},
+			{
+				u"non-ASCII line digit"_q,
+				DebugEntry(message, kSelfPrivateFile, u"3"_q + QChar(0x0667)),
+			},
+			{
+				u"no closing parenthesis"_q,
+				Entry(message + u" (session_private.cpp : 37"_q),
+			},
+			{
+				u"no colon"_q,
+				Entry(message + u" (session_private.cpp 37)"_q),
+			},
+			{
+				u"no blank before the suffix"_q,
+				Entry(message + u"(session_private.cpp : 37)"_q),
+			},
+			{ u"trailing text"_q, SendingEntry(secret) + u" retry"_q },
+			{ u"trailing blank"_q, SendingEntry(secret) + u" "_q },
+		};
+		auto cases = std::vector<TransportCase>{
+			{
+				.label = u"valid"_q,
+				.text = Entry(message + suffix),
+				.expect = { .computed = { { numSite, 1 } } },
+			},
+		};
+		for (const auto &[label, text] : shapes) {
+			cases.push_back({
+				.label = label,
+				.text = text,
+				.expect = { .plain = { { withheld, 1 } } },
+			});
+		}
+		CheckTransportCases(
+			u"secrecy self-test: a carried message under a malformed entry "
+			"start, an mtp_ or app log prefix, with a wrong or truncated "
+			"suffix or with trailing text keeps the withheld site and "
+			"decides"_q,
+			cases);
+	}
+	{
+		const auto &lines = TransportLines();
+		const auto sending = ranges::find_if(lines, [](const TransportLine &l) {
+			return (l.file == kSelfPrivateFile)
+				&& (l.format
+					== u"MTP Info: sending request, size: %1, num: %2, "
+					"time: %3"_q);
+		});
+		const auto found = (sending != end(lines));
+		const auto spans = [&](const QString &text) {
+			return found
+				? TransportSpans(*sending, text, MessageFrom(text))
+				: std::vector<std::pair<int, int>>();
+		};
+		const auto whole = SendingEntry(u"-"_q + secret);
+		const auto valid = spans(whole);
+		const auto validOk = (valid.size() == 3)
+			&& (whole.mid(valid[0].first, valid[0].second - valid[0].first)
+				== kSelfTransportSize)
+			&& (whole.mid(valid[1].first, valid[1].second - valid[1].first)
+				== u"-"_q + secret)
+			&& (whole.mid(valid[2].first, valid[2].second - valid[2].first)
+				== kSelfTransportTime);
+		const auto start = u"MTP Info: sending request, size: "_q
+			+ kSelfTransportSize;
+		const auto truncated = QStringList{
+			Entry(start),
+			Entry(start + u", num: "_q),
+			DebugEntry(start + u", num:"_q, kSelfPrivateFile),
+			DebugEntry(
+				start + u", num: , time: "_q + kSelfTransportTime,
+				kSelfPrivateFile),
+			Entry(message + u" (session_private.cpp :"_q),
+			Entry(message + u" (session_private.cpp"_q),
+			Entry(message + u" ("_q),
+			Entry(message),
+		};
+		auto failing = QStringList();
+		for (auto i = 0; i != int(truncated.size()); ++i) {
+			if (!spans(truncated[i]).empty()) {
+				failing.push_back(QString::number(i));
+			}
+		}
+
+		// Synthetic formats, never carried: a well-formed one matches its
+		// line, and one whose slots or placeholders are malformed matches
+		// nothing, whatever the text.
+		const auto pairLine = DebugEntry(
+			u"Selftest Info: pair "_q
+				+ kSelfTransportSize
+				+ u" and "_q
+				+ kSelfTransportOther,
+			kSelfPrivateFile);
+		const auto synthetic = [](const QString &format, int count) {
+			auto result = TransportLine{
+				.file = kSelfPrivateFile,
+				.format = format,
+			};
+			for (auto i = 0; i != count; ++i) {
+				result.slots.push_back(Computed(u"n%1"_q.arg(i)));
+			}
+			return result;
+		};
+		const auto wellFormedSpans = TransportSpans(
+			synthetic(u"Selftest Info: pair %1 and %2"_q, 2),
+			pairLine,
+			MessageFrom(pairLine));
+		const auto wellFormed = (wellFormedSpans.size() == 2);
+		const auto malformed = std::vector<std::pair<TransportLine, QString>>{
+			{ synthetic(u"Selftest Info: pair %1 and %2"_q, 1), pairLine },
+			{ synthetic(u"Selftest Info: pair %1 and %2"_q, 3), pairLine },
+			{ synthetic(u"Selftest Info: pair %2 and %1"_q, 2), pairLine },
+			{
+				synthetic(u"Selftest Info: pair %10 and %2"_q, 2),
+				DebugEntry(
+					u"Selftest Info: pair "_q
+						+ kSelfTransportSize
+						+ u"0 and "_q
+						+ kSelfTransportOther,
+					kSelfPrivateFile),
+			},
+			{
+				synthetic(u"Selftest Info: pair % %1"_q, 1),
+				DebugEntry(
+					u"Selftest Info: pair % "_q + kSelfTransportSize,
+					kSelfPrivateFile),
+			},
+		};
+		for (auto i = 0; i != int(malformed.size()); ++i) {
+			const auto &[line, text] = malformed[i];
+			if (!TransportSpans(line, text, MessageFrom(text)).empty()) {
+				failing.push_back(u"format#%1"_q.arg(i));
+			}
+		}
+		Check(
+			found && validOk && wellFormed && failing.isEmpty(),
+			u"secrecy self-test: the carried-line matcher finds every whole "
+			"integer of a carried line, its minus included, and matches no "
+			"line cut before a number or inside its suffix, nor any line "
+			"for a format whose slots or placeholders are malformed"_q,
+			u"found=%1 valid=%2 wellFormed=%3 truncated=%4 formats=%5 "
+			"failing=[%6]"_q
+				.arg(B(found))
+				.arg(B(validOk))
+				.arg(B(wellFormed))
+				.arg(truncated.size())
+				.arg(malformed.size())
+				.arg(failing.join(u", "_q)));
+	}
+	{
+		const auto with = [](
+				const QString &size,
+				const QString &num,
+				const QString &time,
+				const QString &line) {
+			return DebugEntry(
+				SendingMessage(size, num, time),
+				kSelfPrivateFile,
+				line);
+		};
+		const auto size = kSelfTransportSize;
+		const auto time = kSelfTransportTime;
+		const auto line = kSelfTransportLine;
+		const auto numbers = std::vector<std::pair<QString, QString>>{
+			{ u"plus sign"_q, with(size, u"+"_q + secret, time, line) },
+			{ u"decimal"_q, with(size, secret + u".5"_q, time, line) },
+			{ u"doubled minus"_q, with(size, u"--"_q + secret, time, line) },
+			{
+				u"decimal in another slot"_q,
+				with(size + u".25"_q, secret, time, line),
+			},
+			{
+				u"exponent in another slot"_q,
+				with(size + u"e3"_q, secret, time, line),
+			},
+			{ u"empty slot"_q, with(QString(), secret, time, line) },
+			{ u"sign-only slot"_q, with(u"-"_q, secret, time, line) },
+			{
+				u"non-ASCII digit in another slot"_q,
+				with(QChar(0x0665) + size.mid(1), secret, time, line),
+			},
+			{
+				u"fullwidth digit in another slot"_q,
+				with(size, secret, QChar(0xFF11) + time.mid(1), line),
+			},
+			{
+				u"non-ASCII digit in the suffix"_q,
+				with(size, secret, time, u"3"_q + QChar(0x0667)),
+			},
+		};
+		auto cases = std::vector<TransportCase>();
+		for (const auto &[label, text] : numbers) {
+			cases.push_back({
+				.label = label,
+				.text = text,
+				.expect = { .plain = { { withheld, 1 } } },
+			});
+		}
+		CheckTransportCases(
+			u"secrecy self-test: a carried message with a malformed number "
+			"(a plus sign, a decimal or exponent, a doubled minus, an empty "
+			"or sign-only slot, a digit outside ASCII) keeps the withheld "
+			"site and decides"_q,
+			cases);
+	}
+	CheckTransportCases(
+		u"secrecy self-test: a carried site that would print a given "
+		"secret, through its head, its slot name or a phrase across both, "
+		"and a hit before its first number are withheld and still decide"_q,
+		{
+			{
+				.label = u"control"_q,
+				.text = KeyCreationEntry(secret),
+				.expect = {
+					.computed = {
+						{ TransportSite(kSelfKeyHead, u"temporaryKeyId"_q), 1 },
+					},
+				},
+			},
+			{
+				.label = u"head secret"_q,
+				.text = KeyCreationEntry(secret),
+				.expect = { .plain = { { withheld, 1 } } },
+				.secrets = { .shortSecrets = { secret, kSelfHeadSecret } },
+			},
+			{
+				.label = u"slot secret"_q,
+				.text = KeyCreationEntry(secret),
+				.expect = { .plain = { { withheld, 1 } } },
+				.secrets = { .shortSecrets = { secret, kSelfSlotSecret } },
+			},
+			{
+				.label = u"phrase across head and slot"_q,
+				.text = KeyCreationEntry(secret),
+				.expect = { .plain = { { withheld, 1 } } },
+				.secrets = {
+					.phrases = { kSelfSpanPhrase },
+					.shortSecrets = { secret },
+				},
+			},
+			{
+				.label = u"hit in the head"_q,
+				.text = KeyCreationEntry(kSelfTransportRequest),
+				.expect = { .plain = { { withheld, 1 } } },
+				.secrets = only(kSelfHeadWord),
+			},
+			{
+				.label = u"hit before the first number"_q,
+				.text = QueueEntry(),
+				.expect = { .plain = { { withheld, 1 } } },
+				.secrets = only(kSelfGapWord),
+			},
+		},
+		true);
+	{
+		const auto body = u"      message: \""_q
+			+ message
+			+ suffix
+			+ u"\" [STRING]"_q;
+		const auto title = u"        title: \""_q
+			+ message
+			+ suffix
+			+ u"\" [STRING]"_q;
+		auto failing = QStringList();
+		const auto token = ScanTransportLine(
+			DebugEntry(
+				u"MTP Info: sending ping, ping_id: "_q + kSelfTransportToken,
+				kSelfPrivateFile),
+			{ .tokens = { kSelfTransportToken } });
+		if (token.tokensOther != 1
+			|| token.bounded
+			|| !token.computedSites.empty()) {
+			failing.push_back(u"token"_q);
+		}
+		const auto words = ScanTransportLine(
+			DebugEntry(
+				u"MTP Info: sending ping, ping_id: "_q + kSelfTransportSize,
+				kSelfPrivateFile),
+			{ .phrases = { { u"sending"_q, u"ping"_q } } });
+		if (words.wordRunsOther != 1 || words.bounded) {
+			failing.push_back(u"word run"_q);
+		}
+		const auto send = ScanTransportLine(
+			SendEntry({
+				u"    query: { messages_sendMessage"_q,
+				body,
+				u"    }"_q,
+			}).join(QChar('\n')),
+			TransportSecrets());
+		const auto sendSite = u"messages_sendMessage/messages_sendMessage"
+			".message"_q;
+		if (send.boundedSend != 1
+			|| send.boundedOther
+			|| send.boundedComputed
+			|| (send.sendSites != Sites{ { sendSite, 1 } })) {
+			failing.push_back(u"Send body"_q);
+		}
+		const auto recv = ScanTransportLine(
+			RecvEntry({
+				u"    topics: [ vector<0x0>"_q,
+				u"      { forumTopic"_q,
+				title,
+				u"      }"_q,
+				u"    ]"_q,
+			}).join(QChar('\n')),
+			TransportSecrets());
+		const auto recvSite = u"messages_forumTopics/forumTopic.title"_q;
+		if (recv.boundedRecv != 1
+			|| recv.boundedOther
+			|| recv.boundedComputed
+			|| (recv.recvSites != Sites{ { recvSite, 1 } })) {
+			failing.push_back(u"Recv body"_q);
+		}
+		const auto declared = ScanTransportLine(
+			AckEntry(secret, kSelfTransportRequest),
+			TransportSecrets(),
+			kSelfTransportPart,
+			{ { .head = kSelfAckHead, .field = u"msgId"_q } });
+		if (!TransportReads(declared, { .plain = { { ackSite, 1 } } })) {
+			failing.push_back(u"declared msgId"_q);
+		}
+		Check(
+			failing.isEmpty(),
+			u"secrecy self-test: on a carried transport line a token, a word "
+			"run and a declared server-sent slot still decide, and the "
+			"line's text in a Send or Recv body keeps that entry's "
+			"direction"_q,
+			u"cases=5 failing=[%1]"_q.arg(failing.join(u", "_q)));
+	}
+
+	{
+		auto rows = QStringList();
+		for (const auto &reading : readings) {
+			rows += SecrecyRows(reading);
+		}
+		const auto leaks = TransportLeaksIn(rows);
+		const auto joined = rows.join(QChar('\n'));
+		const auto sitesPrinted = joined.contains(computedRow)
+			&& joined.contains(ackSite + u" x1"_q)
+			&& joined.contains(dashSite + u" x1"_q)
+			&& joined.contains(withheld + u" x1"_q);
+		Check(
+			(runs > 0)
+				&& (int(readings.size()) == runs)
+				&& !rows.isEmpty()
+				&& leaks.isEmpty()
+				&& sitesPrinted,
+			u"secrecy self-test: no row of the carried transport readings "
+			"carries the synthetic number, another synthetic value or a "
+			"scanned line, while they print a computed, a server-sent, a "
+			"slotless and a withheld site"_q,
+			u"readings=%1/%2 rows=%3 sitesPrinted=%4 hits=[%5]"_q
+				.arg(readings.size())
+				.arg(runs)
+				.arg(rows.size())
+				.arg(B(sitesPrinted))
+				.arg(leaks.join(u", "_q)));
+	}
+	{
+		const auto path = TestLogPath();
+		const auto mark = QFileInfo(path).size();
+		auto written = SecrecyRows(principal.reading);
+		written += SecrecyRows(received.reading);
+		for (const auto &row : written) {
+			Note(row);
+		}
+		const auto appended = AppendedSince(path, mark);
+		const auto leaks = TransportLeaksIn({ appended });
+		Check(
+			principal.prepared
+				&& received.prepared
+				&& !appended.isEmpty()
+				&& appended.contains(computedRow)
+				&& appended.contains(ackSite + u" x1"_q)
+				&& leaks.isEmpty(),
+			u"secrecy self-test: the carried transport rows as written to "
+			"test_log.txt carry none of them either"_q,
+			u"appended=%1 rows=%2 hits=[%3]"_q
+				.arg(B(!appended.isEmpty()))
+				.arg(written.size())
+				.arg(leaks.join(u", "_q)));
+	}
+}
+
 } // namespace
 
 QString SecrecyClassName(SecrecyClass value) {
@@ -2653,7 +5338,9 @@ SecrecyLaunchLogs SelectLaunchLogs(
 			? PartIdentity::Missing
 			: PartIdentity::Accepted),
 	});
+	result.selection = LaunchLogSelection::InvalidTimes;
 	if (launchStart.isValid() && scanAt.isValid()) {
+		const auto reversed = (scanAt < launchStart);
 		const auto time = launchStart.time();
 		auto part = QDateTime(
 			launchStart.date(),
@@ -2681,6 +5368,11 @@ SecrecyLaunchLogs SelectLaunchLogs(
 				++result.candidates;
 			}
 		}
+		result.selection = reversed
+			? LaunchLogSelection::ReversedWindow
+			: (part <= scanAt)
+			? LaunchLogSelection::CappedWindow
+			: LaunchLogSelection::Complete;
 	}
 	for (const auto &part : earlier) {
 		auto source = SecrecySource{
@@ -2722,19 +5414,16 @@ SecrecyLaunchLogs SelectThisLaunchLogs(
 		earlier);
 }
 
-SecrecyReading ReadSecrecy(
-		const SecrecySecrets &secrets,
+Internal::LogScanReading Internal::ReadLogClasses(
 		const SecrecyLaunchLogs &logs,
 		const QString &plantedControl,
-		const std::vector<SecrecyComputedField> &computedFields) {
-	auto result = SecrecyReading();
-	result.launchStart = logs.launchStart;
-	result.scanAt = logs.scanAt;
-	result.candidates = logs.candidates;
-
-	const auto usable = UsableSecrets(secrets, &result);
-	const auto matcher = SecrecyMatcher(usable, computedFields);
-	ReadCanaries(usable, result);
+		const SecrecySecrets *usable,
+		const std::vector<SecrecyComputedField> &computedFields,
+		LogScanObserver *observer) {
+	auto result = LogScanReading();
+	const auto matcher = SecrecyMatcher(
+		usable ? *usable : SecrecySecrets(),
+		computedFields);
 
 	auto order = std::vector<SecrecyClass>{
 		SecrecyClass::TestLog,
@@ -2756,6 +5445,7 @@ SecrecyReading ReadSecrecy(
 			}
 			++reading.candidates;
 			if (IsWindowClass(cls)) {
+				++result.candidates;
 				result.candidateIdentities.push_back(source.name
 					+ QChar('=')
 					+ PartIdentityName(source.identity));
@@ -2766,15 +5456,51 @@ SecrecyReading ReadSecrecy(
 				case PartIdentity::Accepted: ++result.accepted; break;
 				}
 			}
-			ReadSource(source, matcher, plantedControl, reading);
+			ReadSource(
+				source,
+				matcher,
+				plantedControl,
+				reading,
+				observer,
+				usable != nullptr);
 		}
 		DecideClass(reading);
+		result.classes.push_back(std::move(reading));
+	}
+
+	return result;
+}
+
+SecrecyReading ReadSecrecy(
+		const SecrecySecrets &secrets,
+		const SecrecyLaunchLogs &logs,
+		const QString &plantedControl,
+		const std::vector<SecrecyComputedField> &computedFields) {
+	auto result = SecrecyReading();
+	result.launchStart = logs.launchStart;
+	result.scanAt = logs.scanAt;
+	result.candidates = logs.candidates;
+
+	const auto usable = UsableSecrets(secrets, &result);
+	ReadCanaries(usable, result);
+
+	auto scan = Internal::ReadLogClasses(
+		logs,
+		plantedControl,
+		&usable,
+		computedFields);
+	result.classes = std::move(scan.classes);
+	result.accepted = scan.accepted;
+	result.foreign = scan.foreign;
+	result.missing = scan.missing;
+	result.unreadable = scan.unreadable;
+	result.candidateIdentities = std::move(scan.candidateIdentities);
+	for (const auto &reading : result.classes) {
 		if (!reading.decided) {
-			result.undecidedClasses.push_back(SecrecyClassName(cls)
+			result.undecidedClasses.push_back(SecrecyClassName(reading.cls)
 				+ u": "_q
 				+ reading.undecidedReason);
 		}
-		result.classes.push_back(std::move(reading));
 	}
 
 	if (!result.phrasesGiven && !result.shortGiven && !result.tokensGiven) {
@@ -2965,6 +5691,9 @@ void AppendSecrecyScanSelfTest(not_null<Runner*> runner) {
 			u"secrecy_self_prints_nothing"_q,
 			[=] { SelfPrintsNothing(state); },
 		},
+		{ u"secrecy_self_telemetry"_q, [] { SelfTelemetry(); } },
+		{ u"secrecy_self_helper_numbers"_q, [] { SelfHelperNumbers(); } },
+		{ u"secrecy_self_transport"_q, [] { SelfTransport(); } },
 	};
 	for (const auto &[name, then] : stages) {
 		runner->add({

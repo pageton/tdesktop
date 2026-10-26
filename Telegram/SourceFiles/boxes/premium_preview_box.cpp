@@ -938,7 +938,7 @@ struct VideoPreviewDocument {
 	const auto stops = Ui::Premium::ButtonGradientStops();
 	auto result = object_ptr<Ui::FixedHeightWidget>(parent.get(), height);
 	const auto raw = result.data();
-	const auto count = order.size();
+	const auto count = int(order.size());
 	for (auto i = 0; i != count; ++i) {
 		const auto section = order[i];
 		const auto button = Ui::CreateChild<Ui::AbstractButton>(raw);
@@ -1677,6 +1677,9 @@ void DoubledLimitsPreviewBox(
 			premium,
 		});
 	}
+	entries.erase(ranges::remove_if(entries, [](const auto &entry) {
+		return (entry.leftNumber >= entry.rightNumber);
+	}), end(entries));
 	Ui::Premium::ShowListBox(
 		box,
 		st::defaultPremiumLimits,

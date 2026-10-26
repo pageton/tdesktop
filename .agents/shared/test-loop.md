@@ -286,7 +286,7 @@ is the rotated wallet's, in BOTH copies — the marked live copy and the golden 
 the empty line and each copy's own address line; that golden write is the one owner-decided
 exception to the read-only golden folder. Because the golden `tdata` is never modified while the
 file is, the next campaign's P0 reconciles them in process through `Test::ReconcileGramAccount`
-(`Telegram/SourceFiles/test/README.md`, "Account fixture secrets"): fewer local words than the
+(`Telegram/SourceFiles/test/docs/helpers/test_gram_reconcile.md`): fewer local words than the
 file restores custody from the file through the product's own import, and a differing local
 reveal with an equal or greater count rewrites the file from the local reveal. Never delete or
 reset the marked live copy while a campaign may have left a rotation in flight or unrewritten:
@@ -472,84 +472,15 @@ The repository carries a permanent test harness under
 `Telegram/SourceFiles/test/` — always compiled, runtime-gated on `-testagent`
 (`Test::Active()`), with all of its `#ifdef`s inside the harness itself:
 
-**Read `Telegram/SourceFiles/test/README.md` completely before designing,
-authoring, or recovering an overlay.** It is the decision guide for stage
-semantics, exact-object publication, input targeting, capture selection, the
-specialized helpers, and first-run diagnostics. Then read the headers for the
-helpers selected by the design. Search the directory before writing local
-scaffolding.
-
-- `test_runner.h` — the staged scenario engine: `Stage{name, run, until, then, timeout}`,
-  `waitEvent`, `waitForSessionReady`, the normal bounded non-fatal `waitForChatsLoaded()`, and
-  explicit strict `waitForChatsLoadedStrict()`; timing out an ordinary `Stage` ends the whole
-  scenario, while the wall-clock watchdog (default 120s; `TDESKTOP_TEST_WATCHDOG` override in seconds, 1..600, otherwise the default; the armed duration is logged at scenario start)
-  guarantees `TEST_COMPLETE` + quit on every exit path including timeout. `actOnWidget` waits for
-  and lifetime-guards the exact target before acting once. `captureAndInspect` saves the accepted
-  prepared frame and then runs numeric/raster assertions against that same widget and image.
-- `test_log.h` — evidence dir from `TDESKTOP_TEST_EVIDENCE_DIR` (the workspace `test-run`
-  helper sets it), flushed absolute-path logging, `Step/Pass/Fail/Check/Note`, `CheckNear`
-  tolerance assertions, `LogGeometry`, the standard markers.
-- `test_widgets.h` — `FindAll<T>`/`FindFirst<T>`/`FindVisible<T>` (the `dynamic_cast`-based
-  finders that avoid the guaranteed `findChildren<CustomWidget*>` crash), `Click`, `TypeText`,
-  `CommitText`, `PressKey`, `Drag`, and `Wheel` via real Qt events, plus generation-counted,
-  lifetime-guarded `PublishLiveWidget` / `PublishLiveAction` seams for exact layer-owned objects;
-  each delivered event runs with postponed-call processing
-  deferred and is followed by a drain of every pending `Ui::PostponeCall` to empty, so
-  postponed input fix-ups AND their own change handling are settled when the helper returns;
-  wrap programmatic `setText` in `Test::Settle`.
-- `test_capture.h` — `CaptureWidget`/`CaptureRect` (visibility check, `QWidget::grab()` so
-  floating elements and locked desktops cannot occlude, automatic blank-image FAIL, geometry
-  log, `SCREENSHOT` marker), plus `PreparedWidgetCapture`; `Runner::captureWidget` polls an
-  exact target until it has a valid painted frame and saves that same accepted frame,
-  `Crop`/`Zoom`/`ContactSheet` for tight same-scale evidence.
-- `test_ink.h`, `test_style.h`, and `test_panel.h` — painted-ink/contrast measurement, settled
-  palette baselines, and detection of a `Ui::SeparatePanel` show-animation cache.
-- `test_messages.h`, `test_transfer.h`, `test_open_handoff.h`, and `test_launch_fuse.h` — direct
-  sent-message, document-transfer, document-open, and safely blocked OS-launch oracles. Prefer
-  these established task-specific observers over reconstructing the same state in a scenario.
-- `test_agent.h` — `Test::Fire(name)` / `HasFired(name)` named waitpoints;
-  `launch_finished` fires at the end of `Application::run()`. `TDESKTOP_TEST_SCALE` is applied
-  by the harness at startup.
-- `test_scenario.cpp` — the overlay-owned slot: it defines `Test::SetupScenario(runner)` and
-  is a no-op in the repository.
-
-A minimal scenario shape:
-
-```cpp
-void SetupScenario(not_null<Runner*> runner) {
-	runner->waitEvent(u"launch_finished"_q);
-	runner->actOnWidget(
-		u"activate the published target"_q,
-		[] { return Test::ReadLiveWidget(u"task.target"_q).widget; },
-		[](QWidget *widget) { Test::Click(widget); },
-		[](QWidget *widget) {
-			return widget->isVisible() && widget->isEnabled();
-		},
-		Test::kDefaultStageTimeout,
-		[](QWidget *widget) {
-			return u"visible=%1 enabled=%2 size=%3x%4"_q
-				.arg(widget->isVisible())
-				.arg(widget->isEnabled())
-				.arg(widget->width())
-				.arg(widget->height());
-		});
-	runner->captureAndInspect(
-		u"target_surface"_q,
-		[] { return Test::ReadLiveWidget(u"task.surface"_q).widget; },
-		[](QWidget *widget) {
-			return widget->property("contentGeneration").toInt() > 0;
-		},
-		[](QWidget *widget, const QImage &image) {
-			Test::LogGeometry(u"surface"_q, widget->geometry());
-			Test::Check(
-				image.width() >= widget->width(),
-				u"capture covers the surface width"_q,
-				u"image=%1 widget=%2"_q
-					.arg(image.width())
-					.arg(widget->width()));
-		});
-}
-```
+**Read the short `Telegram/SourceFiles/test/README.md` before designing,
+authoring, or recovering an overlay.** Follow its task-specific links to the
+selected helper references in `test/docs/` and read those helpers' headers.
+Do not load the whole reference directory or diagnostic history. Account,
+media, input and capture prerequisites remain required when the design uses
+them; on recovery, search the diagnostic guide for the observed signature.
+Search the helper index before writing local scaffolding. For an initial
+scenario shape, use `test/docs/overlay-example.md` on demand. When adding or
+changing a permanent helper, follow `test/docs/adding-helpers.md`.
 
 **The overlay starts by replacing `test_scenario.cpp` with the task's scenario.** Author the
 scenario fresh against the CURRENT implementation from the task's check design; never re-implement
@@ -691,18 +622,23 @@ command, environment, exit-code, log, artifact and control evidence.
 - **Codegen does not track resource mtimes.** If the task changed only a resource the style codegen
   consumes (an icon `.svg`, etc.) without touching a `.style`, an incremental build will NOT re-pack
   it and the binary keeps the OLD asset. Before building such a task force regeneration — touch the
-  referencing `.style` (or clean the codegen output) — so the change actually ships. A render that
-  shows no difference from before is the symptom of skipping this.
+  referencing `.style` (or clean the codegen output) — so the change actually ships. On macOS never
+  force regeneration with an Xcode clean: see `AGENTS.md` ("### Build Commands" under
+  "## Build Configuration"). A render that shows no difference from before is the symptom of
+  skipping this.
 - Run: execute the workspace helper's `test-run` command with `EXE` and `EVIDENCE_DIR`. One call
   performs the SETUP steps (Test account), creates `EVIDENCE_DIR`, path-scope-kills stragglers,
   then, for a reused marked-live account, moves a non-empty live `tdata/working` to
   `<EVIDENCE_DIR>/stale-crash/working` and every live `tdata/dumps/*.dmp` to
   `<EVIDENCE_DIR>/stale-crash/dumps/` before launch. A zero-byte `tdata/working` is neither moved
   nor reported. It launches `EXE` **with `-testagent -noupdate`** (so a shipped update can never
-  replace the binary under test mid-run) capturing stdout to
-  `<EVIDENCE_DIR>/app_stdout.txt` and stderr to `<EVIDENCE_DIR>/app_stderr.txt` (the flag prevents
-  modal crash hangs, and stderr captures assertion text), enforces **a hard wall-clock deadline
-  from launch** and a quiet-log watchdog while polling `<EVIDENCE_DIR>/test_log.txt`, detects
+  replace the binary under test mid-run) and `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM=1`
+  in its environment - on macOS through LaunchServices in the background when `EXE` is its `.app`
+  bundle's main executable, otherwise directly (Launch activation, below) - with the client's
+  stdout in `<EVIDENCE_DIR>/app_stdout.txt` and its stderr in
+  `<EVIDENCE_DIR>/app_stderr.txt` on both paths (the flag prevents modal crash hangs, and stderr
+  captures assertion text), enforces **a hard wall-clock deadline from launch** and a quiet-log
+  watchdog while polling `<EVIDENCE_DIR>/test_log.txt`, detects
   `TEST_COMPLETE` versus process death (crash) versus the caps elapsing (hang), kills any
   straggler, and returns one JSON report with the parsed markers, stderr tail, fresh crash
   diagnostics, `crashpad_dumps_added`, `death_signals`, and `stale_crash_cleared`. The
@@ -712,21 +648,135 @@ command, environment, exit-code, log, artifact and control evidence.
   `TEST_COMPLETE` alone is not success: when the process writes it and then dies, the verdict is
   `died-after-complete`, not `complete`, on any of three independent signals — a non-zero
   `exit_code`, a new `.dmp` in the live `tdata/dumps/completed/` Crashpad database across the run,
-  or a fresh top-level `tdata/dumps/*.dmp` from a Breakpad build. `crashpad_dumps_added` is that
-  before/after delta, listed in full because `test-run` never clears `completed/` between runs;
-  `death_signals` names which of `"breakpad_dump"`, `"crashpad_dump"` and `"exit_code"` fired, and
-  is `[]` for a healthy run. `stale_crash_cleared` is an ordered list of `{from, kind, to}`
-  entries whose `kind` is `"report"` or `"dump"`, and is `[]` when nothing was cleared.
+  or a fresh top-level `tdata/dumps/*.dmp` from a Breakpad build. `exit_code` is a signal only for
+  a direct launch: a background launch reports it `null`, which leaves the two dump signals.
+  `crashpad_dumps_added` is that before/after delta, listed in full because `test-run` never
+  clears `completed/` between runs; `death_signals` names which of `"breakpad_dump"`,
+  `"crashpad_dump"` and `"exit_code"` fired, and is `[]` for a healthy run. `stale_crash_cleared`
+  is an ordered list of `{from, kind, to}` entries whose `kind` is `"report"` or `"dump"`, and is
+  `[]` when nothing was cleared.
   `--portable-root <dir>` additionally passes `-workdir <dir>/TelegramForcePortable`; the report's
   `workdir` names that redirected working directory and is `null` when the flag was not used, and
   `golden_root` names the executable-directory golden the launch can still read whatever `workdir`
   says. The isolation contract is stated under Test account (portable data) — hard rules. If the
   stale report cannot be moved, `test-run` refuses before launch, prints the helper error on stderr,
-  exits non-zero, and emits no JSON. If a dump cannot be moved, `test-run` leaves it in place,
+  exits non-zero, and emits no JSON. A malformed `--env` value (no `=`, or an empty name), or one
+  naming `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM`, is refused the same way before SETUP,
+  with nothing created. If a dump cannot be moved, `test-run` leaves it in place,
   records `"to": null` (a null destination), and continues to launch. Then read each `SCREENSHOT:`
   image and judge it, save the binary overlay patch, and restore only inventoried overlay paths
   (`overlay-save` — the patch must be saved before that restore). The runner only gathers evidence;
   ASSESS below stays the agent's own adversarial judgement.
+  - **Launch activation (macOS).** Two things activate a client at launch, and the default stops
+    both for an app bundle's main executable. Qt's cocoa plugin activates it when it finishes
+    launching (`applicationDidFinishLaunching`, `qcocoaapplicationdelegate.mm`) unless
+    `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM` is set, and AppKit activates it when it
+    handles the launch `open application` Apple Event, which WindowServer honours for a client the
+    console's terminal exec'd, with the variable set or not; a client LaunchServices launched in
+    the background (`open -g`) is not activated at launch
+    (`2026/10/08/launch-the-testagent-client-without-activating-it`, Runs 2-3). The launched
+    process's environment - only it; nothing is exported in the calling shell - carries
+    `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM=1`, overwriting an inherited value. The same
+    variable skips Qt's activation-policy transform (`qcocoaintegration.mm`), which the
+    bundled Debug app does not need: read with the variable set, the client still checks in under
+    its bundle identifier as a regular application (`lsappinfo` `type="Foreground"`, activation
+    policy regular, the policy with a Dock entry), the same as without it, and owns the menu bar
+    whenever it is active. When `EXE` is its `.app` bundle's main executable
+    (`<bundle>/Contents/MacOS/<name>`, with `CFBundleExecutable` `<name>` in
+    `<bundle>/Contents/Info.plist`), `test-run` launches the bundle in the background with
+    `/usr/bin/open` as
+    `open -g -n -W -a <bundle> --stdout <stdout> --stderr <stderr> --args <arguments>`, with the
+    client's streams going to `app_stdout.txt` / `app_stderr.txt` and the arguments those of a
+    direct launch. `-g` keeps it out of the foreground, `-n` starts a new instance even when
+    another copy of the bundle runs, and `-W` keeps `open` running until the client exits, so the
+    deadline, quiet and grace caps work as for a direct launch. The client inherits the launched
+    environment, `--env` values included, through `open`, whose own output goes to
+    `<EVIDENCE_DIR>/launcher_output.txt`. The report's `launch_method` is `"background"` for that
+    path and `"exec"` for a direct launch. A background launch reports `exit_code` `null`, because
+    `open -W` exits 0 whatever the client's status, and `launcher_exit_code` is `open`'s own
+    status: non-zero when `open` failed (read `launcher_output.txt`), `null` when `test-run` killed
+    `open`, and always `null` for a direct launch, whose `exit_code` is the client's. A deadline,
+    quiet or grace kill of a background launch ends only `open`; the post-run path-scoped kill then
+    ends the client, and `stragglers_killed_after` lists the pids that kill ended, on both paths
+    (`[]` when nothing was left). A background client is not `test-run`'s child, so a Ctrl-C or a
+    process-group or tree kill of `test-run` does not reach it: `test-run` ends it by path when it
+    is interrupted or terminated (SIGINT, SIGTERM or SIGHUP), and after a SIGKILL of `test-run`
+    itself run `workspace.py test-cleanup --exe EXE` (the next `test-run`'s pre-launch kill also
+    ends it). The background client starts in `/`, which is harmless: Telegram
+    moves to its working folder at startup (`QDir::setCurrent(cWorkingDir())`, `logs.cpp`),
+    `-workdir` is passed as an absolute path, and on macOS the folder it started in only resolves
+    start URLs, of which `test-run` passes none. Qt's messages still reach `app_stderr.txt` without
+    a terminal: Qt's Apple log handler copies every enabled message to stderr unless the launched
+    environment sets `OS_ACTIVITY_DT_MODE`, `ACTIVITY_LOG_STDERR`, `CFLOG_FORCE_STDERR` or
+    `CFLOG_FORCE_DISABLE_STDERR` (`AppleUnifiedLogger::preventsStderrLogging`, `qcore_mac.mm`), so
+    do not pass those through `--env` when the run reads Qt's log. `--activate` launches `EXE`
+    directly with the variable removed from the launched environment, also when the calling shell
+    exported it, so Qt and AppKit activate the client at launch as before and the report keeps the
+    client's `exit_code` - for a campaign whose subject is genuine OS activation (the real-focus
+    campaigns) and for control launches. Any other `EXE` - an executable outside a bundle, or one
+    that is not its bundle's main executable - is launched directly with the variable set, so
+    AppKit's launch activation can still activate it. After a background launch the frontmost
+    application keeps its key window, the client reads `QGuiApplication::applicationState()`
+    inactive, and its windows open behind the frontmost application's. A window shown already
+    covered reads `isExposed()` true until the window server first reports a change for it, so
+    `exposed=1` is no proof that the window is on screen; after such a change a covered window
+    reads unexposed and gets no paints. Either way a stage that needs paints calls
+    `Test::KeepWindowExposed` (the not-marking-read and post-paint self-tests do that for the
+    primary window themselves); focus-routed actions need `Test::ForceWindowActive`. Only the
+    launch's own activation is suppressed: product flows and some self-tests still request
+    activation (`Telegram/SourceFiles/test/docs/launch.md`), and after a background launch
+    the window server may grant or refuse that request - on this host it granted it about 11 s after
+    launch in two default runs and refused it about 20 s after launch in a third, under a condition
+    those runs did not establish (`2026/10/08/launch-the-testagent-client-without-activating-it`,
+    Runs 4, 8 and 9). A granted request takes the key window from the frontmost application. After a
+    refused one the client stays inactive and the frontmost application keeps its key window, but
+    the client's window may still be ordered in front of the frontmost application's window by the
+    request's own window ordering. In Run 9 above the primary window stayed covered after its
+    restore; with an overlay that made the client's own application-activation calls no-ops,
+    reproducing that refusal under another stage sequence, the not-marking-read self-test's restore
+    through `Window::Controller::activate()` still ran `makeKeyAndOrderFront:` / `orderFront:` and
+    the un-minimize, and the inactive primary window was in front for about 4 s, until a later
+    request put it behind again
+    (`2026/10/09/keep-background-testagent-runs-on-macos-unthrottled-and-painting`, Runs 0 and 3). A
+    scenario's own `Platform::ActivateThisProcess()` or `Window::Controller::activate()` is
+    therefore no reliable route to OS activation under the default; a campaign whose subject is
+    genuine OS activation launches with `--activate`. `--env` may
+    not name the variable. The report's `launch_activation` is `"suppressed"` by default and
+    `"allowed"` with `--activate`; it names the requested mode, and on macOS only
+    `launch_method: "background"` keeps the launch from activating the client. Off macOS nothing
+    reads the variable, both modes launch alike (directly, `launch_method: "exec"`), and whether the
+    client takes the foreground is the window system's policy (Windows shows the first window with
+    `SW_SHOWNORMAL` from a foreground launcher; X11 leaves it to the window manager's focus policy;
+    Wayland to the compositor). A client the launch did not activate is a background application,
+    which macOS may nap and whose timers it may coalesce: in background runs on this host without a
+    hold, a sampler's heartbeat gaps grew to 100-290 ms after about 15 s of normal cadence
+    (`2026/10/01/animate-gram-card-sending-and-settle-effects`, Run 1), and a 4 ms precise sampler
+    ticked every 50-1000 ms from about the 80th second
+    (`2026/10/02/show-the-input-method-composition-in-the-gram-send-amount`, Run 1). On a locked
+    console macOS napped such a client without a hold: a 16 ms timer was throttled from about 30 s
+    after process start, with largest gaps of 216 ms and 359 ms
+    (`2026/10/09/keep-background-testagent-runs-on-macos-unthrottled-and-painting`, Runs 0 and 4).
+    Another application's window covering the client did not guarantee it: on an unlocked console, a
+    client without a hold that the frontmost application's window covered kept an exact 16 ms timer
+    cadence, largest gap 18-19 ms, over 60 s and over 300 s (Runs 1 and 2). Those runs did not
+    establish what made macOS nap the client. So on macOS the
+    harness holds one user-initiated, latency-critical `NSProcessInfo` activity
+    (`NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical`; idle system sleep
+    stays allowed) for the whole `-testagent` run, `--activate` launches included:
+    `Test::ApplyStartupOverrides()` (`Telegram/SourceFiles/test/test_agent.cpp`) begins it early in
+    `Application::run()`, before `Test::Start()`, and never ends it, so it lasts until the process
+    exits, a watchdog or stage-timeout ending included. An overlay needs no activity of its own: the
+    per-overlay `BeginLatencyActivity` of the
+    `2026/10/07/animate-the-sending-row-for-a-collectible-transfer` overlay is history, and a second
+    activity is harmless but redundant. A campaign whose subject is background scheduling itself
+    (App Nap, timer coalescing, throttled-timer behaviour) launches with
+    `test-run --env TDESKTOP_TEST_APP_NAP=allow` to leave the hold off; any other non-empty value is
+    logged as rejected and the hold is kept. Check the run's one reading row, right after the
+    `TDESKTOP_TEST_SCALE` row of `test_log.txt` (after a rejected-value row when there is one):
+    `NOTE: TDESKTOP_TEST_APP_NAP=[<value>] applied: hold=<active|off> source=<default|environment> - <reason>`.
+    A held run reads `hold=active source=default`, the opt-out reads `hold=off source=environment`,
+    and `hold=off source=default` gives the reason the activity could not be begun. Off macOS
+    nothing reads `TDESKTOP_TEST_APP_NAP` and nothing is held.
   - **Console input (macOS).** `input_before` and `input_after` are console readings taken right
     before the launch and after the process ends; `input_after` comes after the post-run straggler
     kill and the crash/log collection, just before the report prints. Each holds `time` (local
@@ -734,6 +784,11 @@ command, environment, exit-code, log, artifact and control evidence.
     `frontmost_app` (the frontmost application's name, from `lsappinfo`) and `screen_locked` (the
     on-console session's `CGSSessionScreenIsLocked`, `false` when absent), each beside a
     `<name>_error` that says why the value is `null`; `input_after` adds `seconds_since_launch`.
+    After a default launch with no stage that activated the client, `input_after.frontmost_app`
+    normally equals `input_before.frontmost_app`; after a launch or a stage that activated the
+    client, macOS hands the foreground to some application when the client quits, which need not
+    be the one frontmost before (`Parallels Desktop` before and `cmux` after in Run 1 of
+    `2026/10/08/keep-an-occluded-harness-window-exposed-without-activating-it`).
     `input_during_run` is `true` when `input_after.idle_seconds` is below
     `input_after.seconds_since_launch`, `false` when it covers it, and `null` when either reading
     lacks its idle time — always off macOS, where every value is `null` with its reason. It says
@@ -753,10 +808,74 @@ command, environment, exit-code, log, artifact and control evidence.
     flag. The wait runs before the account setup, the straggler kill and the crash snapshots, and
     counts toward none of `--deadline`, `--quiet` or `duration_seconds`; a missing executable,
     portable root or golden folder fails before any wait. Use it when the console is unlocked and
-    someone may be using it, especially for a packed harness run whose focus- or paint-sensitive
-    stages (a menu that closes on an outside press, a paint sampler) a stray click or keystroke can
-    abort; pick a requirement at least as long as the expected run and still read
+    someone may be using it, especially for a packed harness run: after a default launch the
+    owner's keystrokes reach the client only once a stage activates it, but a click anywhere still
+    closes an open popup (Qt's global popup monitor, `QCocoaWindow::setupPopupMonitor`,
+    `qcocoawindow.mm`), and a stage that activates the client takes the key window from the
+    owner's application; pick a requirement at least as long as the expected run and still read
     `input_during_run` afterwards — the gate makes input less likely, it does not prevent it.
+    The occlusion no longer depends on input at all: after a default background launch the
+    client's windows open behind the frontmost application's whether or not anyone uses the
+    console. A window shown already covered reads `isExposed()` true until the window server first
+    reports a change for it, and a covered window reads unexposed and gets no paints after one
+    (Launch activation, above), so a window a stage needs painted is kept exposed without
+    activating the app by `Test::KeepWindowExposed`
+    (`Telegram/SourceFiles/test/test_window_exposure.h`) either way; the gate itself cannot prevent
+    that occlusion.
+  - **Host load gate (Windows).** `--host-load` waits before the launch, within a bound and without
+    stopping or otherwise touching any process, until no build-tool process runs (from any checkout
+    or user) and the other processes' CPU has stayed below a threshold, then samples their CPU from
+    the launch until the client's process ends. `--host-load-threshold <percent>` (default 15, above
+    0 and at most 100), `--host-load-hold <seconds>` (default 5, positive),
+    `--host-load-max <seconds>` (default 600, zero or more) and `--host-load-interval <seconds>`
+    (default 1, at least 0.1) tune it and do nothing without it; an invalid value is refused before
+    SETUP with nothing created. Load is a percent of the whole machine: the CPU time the other
+    processes used in a sample's interval over that interval times `logical_processors`
+    (`os.cpu_count()`), so one busy thread on 16 logical processors reads 6.25. "Other" excludes
+    `test-run`'s own process (`excluded.test_run_pid`) and the launched client's process tree
+    (`client_pid`, and every member seen, by `name` and `pid`, in `client_processes`; a descendant
+    stays excluded after the process between it and the client exits, a reused pid does not inherit
+    the exclusion). The build tools are the build-lock names `cl`, `cmake`, `cvtres`, `link`, `moc`,
+    `msbuild`, `ninja`, `rc`, `rcc` and `uic` `.exe`, compared case-insensitively, but not
+    `mspdbsrv.exe`, the PDB server that outlives the build that started it: it never holds the wait,
+    and its CPU still counts. MSBuild worker nodes that an IDE or `/nodeReuse` keeps alive after a
+    build are `MSBuild.exe` processes and hold the wait to its bound, named in `build_tools_seen`.
+    The wait takes a baseline reading, then one sample per interval; a sample with a build tool or
+    with the others at or above the threshold restarts the hold, and the wait is met once the
+    samples have stayed clear for `--host-load-hold` seconds. When `--host-load-max` elapses first
+    the client launches anyway with `met: false`; no pause runs past the bound, and
+    `--host-load-max 0` takes the baseline only and launches at once. The wait runs after the
+    `--wait-idle` gate (both are recorded), the account setup, the straggler kill, the stale-crash
+    move and the crash snapshots, right before the launch, so its condition is the last one
+    established; it counts toward none of `--deadline`, `--quiet` or `duration_seconds`, and a
+    missing executable, portable root or golden folder fails before any reading. It can add up to
+    `--host-load-max` seconds before the launch: size the command's timeout for that, or run it in
+    the background. `host_load` is `null` without the flag; otherwise it echoes `threshold_percent`,
+    `hold_seconds`, `max_seconds` and `interval_seconds` and records `logical_processors`,
+    `excluded`, `unsupported`, `wait` (`met`, `waited_seconds`, `build_tools_seen` by `name` and
+    `pid`, the last five samples in `last_samples`, `error`), `trace` (`samples`, `mean_percent`,
+    `max_percent`, `over_threshold` - the samples at or above the threshold - `build_tools_seen`,
+    `error`) and `samples_file`. A sample holds `seconds` (the end of its interval, from the wait's
+    or the trace's start), `others_percent`, `top` (up to three other processes with a nonzero
+    share, by `name`, `pid` and `percent`) and `build_tools`; the named
+    `<EVIDENCE_DIR>/host_load_samples.jsonl` holds every wait sample and then every trace sample,
+    one JSON object per line with `phase` `"wait"` or `"trace"`. A failed wait reading ends the wait
+    with `met: null` and the reason in `wait.error` (`<Type>: <message>`), and the client launches;
+    a failed trace reading ends the trace with `trace.error` and keeps the samples taken before it;
+    a failed file write leaves `samples_file` `null` with the reason in `samples_file_error`; a
+    client that ends within the first interval leaves `samples: 0` with `null` mean and maximum,
+    which is no measurement, not a quiet launch. Off Windows `unsupported` gives the reason, the
+    parameters are echoed, every other field is `null`, and the launch is not delayed. The readings
+    never fail the command and never change `outcome`, `verdict_hint` or any other field. The
+    sampler stays inside `test-run`: one `NtQuerySystemInformation` process snapshot per reading, no
+    helper process, no handle to another process, and `test-run` starts no process while it waits or
+    samples, so the sampler's few milliseconds per reading are `test-run`'s own CPU and excluded
+    with it. A process that starts and ends between two readings is never seen, CPU a process uses
+    after its last reading is lost, and the interval in which the client ends is not sampled, so a
+    short burst reads low and a short-lived build tool can be missed. Every launch whose wall-clock
+    timing is compared against another launch uses `--host-load`, and the assessor reads its `wait`,
+    its `trace` and the series' `top` contributors before counting it; whether a loaded launch
+    counts stays the assessor's judgement.
 
 ### Crashes & assertions (always launch the test binary with `-testagent`)
 
@@ -781,9 +900,11 @@ report is also sufficient when Telegram's reporter wrote nothing. **After** `TES
 opposite holds: `CrashReports::Finish()` unlinks `tdata/working` during the clean shutdown that
 precedes a teardown fault, so the only signals left are a non-zero `exit_code`, a new
 `tdata/dumps/completed/*.dmp` on the macOS Crashpad build, and a new top-level `tdata/dumps/*.dmp`
-on the Breakpad builds — `test-run` reads all three and reports `died-after-complete`. So **always
-pass `-testagent`**, and on a crash gather diagnostics in this order before
-deciding the verdict:
+on the Breakpad builds — `test-run` reads all three and reports `died-after-complete`. `exit_code`
+counts only for a direct launch: a macOS background launch reports it `null` (`open -W` exits 0
+whatever the client's status), so after `TEST_COMPLETE` such a run relies on the new
+`tdata/dumps/completed/*.dmp`. So **always pass `-testagent`**, and on a crash gather diagnostics
+in this order before deciding the verdict:
 
 1. **`<EVIDENCE_DIR>/app_stderr.txt`** — the `[testagent] assert: …` line gives the failed expression and
    `file:line` (e.g. `vector(1931) : … vector subscript out of range`). Usually enough to localize.
@@ -837,16 +958,24 @@ implementation or overlay verdict:
   `Local::readLangPack()`;
 - the same signature occurs on two launches.
 
-Before changing recovery strategies, preserve the current overlay and account,
-stop only the exact-path app,
-follow the portable-folder safety-copy procedure in `AGENTS.md`, then run one full Xcode Debug
-clean followed by `BUILD` (the configured-tree clean is normally
-`cmake --build out --config Debug --target clean`). Restore only portable folders missing after
-the clean, never overwrite survivors, and retain the external backup through one successful
-post-build launch. Rerun the same scenario once. Record the preceding runs as `TEST_FLAW` caused
-by stale generated-language objects; do not spend an implementation attempt or re-author the
-overlay. If the identical signature remains after the single clean rebuild, resume normal crash
-classification and the directness ladder. Never loop clean rebuilds.
+Before changing recovery strategies, preserve the current overlay and account and stop only the
+exact-path app. Then run the clean rebuild in `AGENTS.md` ("### Forcing a full recompile on macOS"
+under "## Troubleshooting") once, exactly as written there, its precondition and checks included.
+It deletes only the intermediate tree `out/build`, never runs an Xcode clean, and
+rebuilds with `BUILD`. Its check before the rebuild must show that `out/build`, which holds every
+intermediate object file, is gone; its check after the rebuild must show that the rebuild
+compiled every object file and that every entry `out/Debug` held before is still present. The
+step has no accepted failure: any other result stops the recovery. Do not substitute an Xcode
+clean (`--target clean`, `--clean-first` or a Clean in the Xcode app): `AGENTS.md`
+("### Build Commands" under "## Build Configuration") explains how `--target clean` and
+`--target Telegram --clean-first` can delete `out/Debug` with every portable folder, and why an
+exit 65 from `--target clean` does not prove that `out/Debug` survived. Never mark `out/Debug`
+deletable (`xattr -w com.apple.xcode.CreatedByBuildSystem true`, the hint in Xcode's refusal to
+delete it), and never move, rename or remove a portable folder or any other entry of `out/Debug`
+to make a clean succeed. Rerun the same scenario once. Record the preceding runs as `TEST_FLAW`
+caused by stale generated-language objects; do not spend an implementation attempt or re-author
+the overlay. If the identical signature remains after the single clean rebuild, resume normal
+crash classification and the directness ladder. Never loop clean rebuilds.
 
 ### Hangs & freezes (two layers, because they have two causes)
 
