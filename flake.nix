@@ -37,6 +37,7 @@
             # cmake/external/pango (MicroTeX text rendering).
             packages = [
               pkgs.ccache
+              pkgs.lld
               pkgs.pango
               pkgs.qt6.qtdeclarative
               pkgs.qt6.qtimageformats
