@@ -359,9 +359,6 @@ public:
 	[[nodiscard]] bool isFakeHistoryItem() const {
 		return _flags & MessageFlag::FakeHistoryItem;
 	}
-	[[nodiscard]] bool isLegacyMessage() const {
-		return _flags & MessageFlag::Legacy;
-	}
 	[[nodiscard]] bool canBeSelected() const;
 	[[nodiscard]] bool isFakeAboutView() const {
 		return _flags & MessageFlag::FakeAboutView;
