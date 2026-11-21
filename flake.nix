@@ -17,6 +17,20 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          # prepare.py pins ada v3.2.9 and cmake links it statically; nixpkgs only carries 4.x shared
+          ada = pkgs.stdenv.mkDerivation {
+            pname = "ada";
+            version = "3.2.9";
+            src = pkgs.fetchFromGitHub {
+              owner = "ada-url";
+              repo = "ada";
+              rev = "v3.2.9";
+              hash = "sha256-piQ63kZ9P22mRAzhiRXhgep7X6zdj909r3wDyEwymI4=";
+            };
+            nativeBuildInputs = [ pkgs.cmake ];
+            cmakeFlags = [ "-DBUILD_SHARED_LIBS=OFF" ];
+          };
+          tde2e = pkgs.tdlib.override { tde2eOnly = true; };
         in
         {
           default = pkgs.mkShell {
@@ -36,11 +50,15 @@
             # the pangocairo pkg-config module required by upstream's
             # cmake/external/pango (MicroTeX text rendering).
             packages = [
+              ada
+              tde2e
               pkgs.ccache
               pkgs.lld
               pkgs.pango
               pkgs.qt6.qtdeclarative
               pkgs.qt6.qtimageformats
+              pkgs.tlottie
+              pkgs.wallet-engine
             ];
 
             shellHook =
@@ -77,10 +95,16 @@
                 ];
               in
               ''
+                export PKG_CONFIG_PATH="${pkgs.glib.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                export XDG_DATA_DIRS="${pkgs.glib.dev}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
                 export QT_PLUGIN_PATH="${imagePlugins}''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
                 # CMake discovers Qt packages via PATH prefixes; qtimageformats
                 # ships no binaries, so put its store path on the prefix path.
-                export CMAKE_PREFIX_PATH="${pkgs.qt6.qtimageformats}''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+                export CMAKE_PREFIX_PATH="${ada}:${pkgs.qt6.qtimageformats}''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+                # like nixpkgs' cmake hook: shell inputs on the prefix path, one glib pinned above them
+                for _p in $buildInputs; do
+                  export CMAKE_PREFIX_PATH="''${CMAKE_PREFIX_PATH}:$_p"
+                done
                 export LD_LIBRARY_PATH="${webviewLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 export XDG_DATA_DIRS="${webviewDataDirs}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
                 export GIO_EXTRA_MODULES="${pkgs.glib-networking}/lib/gio/modules''${GIO_EXTRA_MODULES:+:$GIO_EXTRA_MODULES}"
@@ -146,8 +170,8 @@
                 export CCACHE_SLOPPINESS=pch_defines,time_macros
 
                 echo "Configure and build a Debug version:"
-                echo "    ./Telegram/configure.sh debug -DTDESKTOP_API_ID=\$TDESKTOP_API_ID -DTDESKTOP_API_HASH=\$TDESKTOP_API_HASH"
-                echo "    cmake --build out/Debug"
+                echo "    ./Telegram/configure.sh debug -DTDESKTOP_API_ID=\$TDESKTOP_API_ID -DTDESKTOP_API_HASH=\$TDESKTOP_API_HASH -DDESKTOP_APP_USE_PACKAGED=ON -DBUILD_EMBED_IGNORE=ON"
+                echo "    cmake --build out --config Debug --target Telegram"
                 echo "Run it from this shell so WebApps find WebKitGTK:"
                 echo "    out/Debug/Telegram"
               '';
