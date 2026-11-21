@@ -1,6 +1,12 @@
 name: Linux.
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Run the release packaging build instead of the debug build'
+        default: false
+        type: boolean
 env:
   TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
   TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
@@ -9,6 +15,7 @@ jobs:
 
   linux:
     name: Rocky Linux 8
+    if: ${{ !inputs.release }}
     runs-on: ${{ (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly') && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
 
     strategy:
@@ -178,7 +185,7 @@ jobs:
 
   linux-release:
     name: Rocky Linux 8 Release
-    if: github.event_name == 'push'
+    if: ${{ inputs.release }}
     runs-on: ${{ (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/nightly') && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
 
     env:
