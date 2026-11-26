@@ -17,19 +17,6 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          # prepare.py pins ada v3.2.9 and cmake links it statically; nixpkgs only carries 4.x shared
-          ada = pkgs.stdenv.mkDerivation {
-            pname = "ada";
-            version = "3.2.9";
-            src = pkgs.fetchFromGitHub {
-              owner = "ada-url";
-              repo = "ada";
-              rev = "v3.2.9";
-              hash = "sha256-piQ63kZ9P22mRAzhiRXhgep7X6zdj909r3wDyEwymI4=";
-            };
-            nativeBuildInputs = [ pkgs.cmake ];
-            cmakeFlags = [ "-DBUILD_SHARED_LIBS=OFF" ];
-          };
           tde2e = pkgs.tdlib.override { tde2eOnly = true; };
         in
         {
@@ -49,14 +36,16 @@
             # qt-plugins tree generated next to the binary. pango provides
             # the pangocairo pkg-config module required by upstream's
             # cmake/external/pango (MicroTeX text rendering).
+            # rustc and cargo build the Rust widget helper (rustc 1.96+).
             packages = [
-              ada
               tde2e
+              pkgs.cargo
               pkgs.ccache
               pkgs.lld
               pkgs.pango
               pkgs.qt6.qtdeclarative
               pkgs.qt6.qtimageformats
+              pkgs.rustc
               pkgs.tlottie
               pkgs.wallet-engine
             ];
@@ -100,7 +89,7 @@
                 export QT_PLUGIN_PATH="${imagePlugins}''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
                 # CMake discovers Qt packages via PATH prefixes; qtimageformats
                 # ships no binaries, so put its store path on the prefix path.
-                export CMAKE_PREFIX_PATH="${ada}:${pkgs.qt6.qtimageformats}''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+                export CMAKE_PREFIX_PATH="${pkgs.qt6.qtimageformats}''${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
                 # like nixpkgs' cmake hook: shell inputs on the prefix path, one glib pinned above them
                 for _p in $buildInputs; do
                   export CMAKE_PREFIX_PATH="''${CMAKE_PREFIX_PATH}:$_p"
